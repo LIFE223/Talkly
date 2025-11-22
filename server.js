@@ -1,6 +1,4 @@
-// server.js - Talky with GitHub-backed JSON storage
-// Node.js + Express + sessions + GitHub Contents API for persistence.
-
+// server.js - Talky with GitHub-backed storage + encrypted chats + basic calls
 const express = require("express");
 const path = require("path");
 const crypto = require("crypto");
@@ -8,7 +6,6 @@ const session = require("express-session");
 
 const app = express();
 
-// ---- Env vars ----
 const PORT = process.env.PORT || 3000;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_OWNER = process.env.GITHUB_OWNER;
@@ -29,15 +26,13 @@ app.use(
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: false, // set to true behind HTTPS proxy
+      secure: false,
       maxAge: 7 * 24 * 60 * 60 * 1000
     }
   })
 );
 
 app.use(express.static(path.join(__dirname, "public")));
-
-// -------- Small helpers --------
 
 function generateId(prefix) {
   const rnd = crypto.randomBytes(4).toString("hex");
@@ -60,8 +55,6 @@ function verifyPassword(password, stored) {
   return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(computed));
 }
 
-// -------- GitHub JSON "DB" helpers --------
-
 async function githubRequest(path, options = {}) {
   const url = `https://api.github.com${path}`;
   const res = await fetch(url, {
@@ -79,11 +72,9 @@ async function githubRequest(path, options = {}) {
   return res.json();
 }
 
-// Load data.json from GitHub (or initialize if missing)
 async function loadDB() {
   if (!GITHUB_TOKEN || !GITHUB_OWNER || !GITHUB_REPO) {
-    // fallback in case env not set, but avoid crashing
-    return { users: [], chats: [], messages: [] };
+    return { users: [], chats: [], messages: [], calls: [] };
   }
 
   try {
@@ -94,20 +85,23 @@ async function loadDB() {
     );
     const content = Buffer.from(file.content, "base64").toString("utf8");
     const json = JSON.parse(content);
-    // attach sha so we can update
+
     json._sha = file.sha;
+    if (!Array.isArray(json.users)) json.users = [];
+    if (!Array.isArray(json.chats)) json.chats = [];
+    if (!Array.isArray(json.messages)) json.messages = [];
+    if (!Array.isArray(json.calls)) json.calls = [];
+
     return json;
   } catch (err) {
-    // If 404, create a new one
     if (String(err.message).includes("404")) {
-      return { users: [], chats: [], messages: [] };
+      return { users: [], chats: [], messages: [], calls: [] };
     }
     console.error("Failed to load DB from GitHub:", err);
-    return { users: [], chats: [], messages: [] };
+    return { users: [], chats: [], messages: [], calls: [] };
   }
 }
 
-// Save DB back to GitHub
 async function saveDB(db) {
   if (!GITHUB_TOKEN || !GITHUB_OWNER || !GITHUB_REPO) return;
   const sha = db._sha;
@@ -135,13 +129,10 @@ async function saveDB(db) {
     }
   );
 
-  // store new sha
   if (res && res.content && res.content.sha) {
     db._sha = res.content.sha;
   }
 }
-
-// -------- Middleware: auth / admin --------
 
 function requireAuth(req, res, next) {
   if (!req.session || !req.session.userId) {
@@ -156,8 +147,6 @@ function requireAdmin(req, res, next) {
   }
   next();
 }
-
-// -------- Routes: me / auth --------
 
 app.get("/api/me", async (req, res) => {
   const db = await loadDB();
@@ -193,7 +182,7 @@ app.post("/api/auth/signup", async (req, res) => {
 
   const id = generateId("u");
   const passwordHash = createPasswordHash(password);
-  const isAdmin = db.users.length === 0; // first user = admin
+  const isAdmin = db.users.length === 0;
 
   const user = {
     id,
@@ -203,64 +192,6 @@ app.post("/api/auth/signup", async (req, res) => {
     createdAt: new Date().toISOString()
   };
   db.users.push(user);
-
-  // Seed default chats for first user only (demo)
-  if (db.chats.length === 0) {
-    const c1 = { id: generateId("c"), name: "Alex Johnson", ownerId: id };
-    const c2 = { id: generateId("c"), name: "Family Group", ownerId: id };
-    db.chats.push(c1, c2);
-    db.messages.push(
-      {
-        id: generateId("m"),
-        chatId: c1.id,
-        fromUserId: "contact_alex",
-        text: "Hey! Just checking if you’re free later tonight?",
-        ts: Date.now() - 600000
-      },
-      {
-        id: generateId("m"),
-        chatId: c1.id,
-        fromUserId: "contact_alex",
-        text: "I want to show you something cool on video.",
-        ts: Date.now() - 590000
-      },
-      {
-        id: generateId("m"),
-        chatId: c1.id,
-        fromUserId: id,
-        text: "Yeah, I’m free after 7.",
-        ts: Date.now() - 580000
-      },
-      {
-        id: generateId("m"),
-        chatId: c1.id,
-        fromUserId: "contact_alex",
-        text: "Perfect, I’ll call you here!",
-        ts: Date.now() - 570000
-      },
-      {
-        id: generateId("m"),
-        chatId: c2.id,
-        fromUserId: "contact_family",
-        text: "Don’t forget Sunday dinner at 6pm.",
-        ts: Date.now() - 3600000
-      },
-      {
-        id: generateId("m"),
-        chatId: c2.id,
-        fromUserId: "contact_family",
-        text: "Let’s try using Talky this time 👍",
-        ts: Date.now() - 3500000
-      },
-      {
-        id: generateId("m"),
-        chatId: c2.id,
-        fromUserId: id,
-        text: "I’ll help Grandma join.",
-        ts: Date.now() - 3400000
-      }
-    );
-  }
 
   await saveDB(db);
 
@@ -312,12 +243,10 @@ app.post("/api/auth/logout", (req, res) => {
   });
 });
 
-// -------- Chats & messages --------
-
 app.get("/api/chats", requireAuth, async (req, res) => {
   const db = await loadDB();
   const userId = req.session.userId;
-  const chats = db.chats.filter((c) => c.ownerId === userId);
+  const chats = db.chats.filter((c) => (c.participantIds || []).includes(userId));
   const messagesByChat = {};
   for (const chat of chats) {
     messagesByChat[chat.id] = db.messages
@@ -327,23 +256,77 @@ app.get("/api/chats", requireAuth, async (req, res) => {
   res.json({ chats, messagesByChat });
 });
 
+app.post("/api/chats", requireAuth, async (req, res) => {
+  const { name, participants, encryptionKeyHash } = req.body || {};
+  if (!name) return res.status(400).json({ error: "Chat name required." });
+  if (!Array.isArray(participants) || participants.length === 0) {
+    return res.status(400).json({ error: "At least one other participant is required." });
+  }
+  if (!encryptionKeyHash || typeof encryptionKeyHash !== "string") {
+    return res.status(400).json({ error: "Missing encryption key hash." });
+  }
+
+  const db = await loadDB();
+  const allUsers = db.users;
+  const participantIds = [];
+
+  const currentUserId = req.session.userId;
+  participantIds.push(currentUserId);
+
+  for (const uname of participants) {
+    const u = allUsers.find(
+      (user) => user.username.toLowerCase() === String(uname).toLowerCase()
+    );
+    if (!u) {
+      return res
+        .status(400)
+        .json({ error: `User not found: ${uname}` });
+    }
+    if (!participantIds.includes(u.id)) {
+      participantIds.push(u.id);
+    }
+  }
+
+  const type = participantIds.length > 2 ? "group" : "dm";
+
+  const chat = {
+    id: generateId("c"),
+    name,
+    type,
+    participantIds,
+    encryption: {
+      version: 1,
+      keyHash: encryptionKeyHash
+    },
+    createdAt: new Date().toISOString()
+  };
+
+  db.chats.push(chat);
+  await saveDB(db);
+
+  res.status(201).json({ chat });
+});
+
 app.post("/api/messages", requireAuth, async (req, res) => {
-  const { chatId, text } = req.body || {};
-  if (!chatId || !text) {
-    return res.status(400).json({ error: "chatId and text are required." });
+  const { chatId, ciphertext, iv } = req.body || {};
+  if (!chatId || !ciphertext || !iv) {
+    return res.status(400).json({ error: "chatId, ciphertext, and iv are required." });
   }
 
   const db = await loadDB();
   const chat = db.chats.find((c) => c.id === chatId);
-  if (!chat || chat.ownerId !== req.session.userId) {
+  const userId = req.session.userId;
+
+  if (!chat || !(chat.participantIds || []).includes(userId)) {
     return res.status(404).json({ error: "Chat not found." });
   }
 
   const msg = {
     id: generateId("m"),
     chatId,
-    fromUserId: req.session.userId,
-    text,
+    fromUserId: userId,
+    ciphertext,
+    iv,
     ts: Date.now()
   };
   db.messages.push(msg);
@@ -352,22 +335,90 @@ app.post("/api/messages", requireAuth, async (req, res) => {
   res.status(201).json({ message: msg });
 });
 
-app.post("/api/chats", requireAuth, async (req, res) => {
-  const { name } = req.body || {};
-  if (!name) return res.status(400).json({ error: "Chat name required." });
+app.post("/api/calls", requireAuth, async (req, res) => {
+  const { toUsername, type, chatId } = req.body || {};
+  if (!toUsername || !type) {
+    return res.status(400).json({ error: "toUsername and type are required." });
+  }
+  if (!["video", "audio"].includes(type)) {
+    return res.status(400).json({ error: "Invalid call type." });
+  }
 
   const db = await loadDB();
-  const chat = {
-    id: generateId("c"),
-    name,
-    ownerId: req.session.userId
+  const toUser = db.users.find(
+    (u) => u.username.toLowerCase() === String(toUsername).toLowerCase()
+  );
+  if (!toUser) {
+    return res.status(400).json({ error: "Target user not found." });
+  }
+
+  const call = {
+    id: generateId("call"),
+    type,
+    fromUserId: req.session.userId,
+    toUserId: toUser.id,
+    chatId: chatId || null,
+    status: "ringing",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
   };
-  db.chats.push(chat);
+
+  db.calls.push(call);
   await saveDB(db);
-  res.status(201).json({ chat });
+  res.status(201).json({ call });
 });
 
-// -------- Admin endpoints --------
+app.get("/api/calls/pending", requireAuth, async (req, res) => {
+  const db = await loadDB();
+  const userId = req.session.userId;
+  const now = Date.now();
+
+  db.calls = db.calls.filter((c) => {
+    const age = now - new Date(c.createdAt).getTime();
+    return age < 60 * 60 * 1000;
+  });
+
+  await saveDB(db);
+
+  const pending = db.calls.filter(
+    (c) => c.toUserId === userId && c.status === "ringing"
+  );
+  res.json({ calls: pending });
+});
+
+app.post("/api/calls/:id/accept", requireAuth, async (req, res) => {
+  const callId = req.params.id;
+  const db = await loadDB();
+  const call = db.calls.find((c) => c.id === callId);
+  const userId = req.session.userId;
+
+  if (!call) return res.status(404).json({ error: "Call not found." });
+  if (call.toUserId !== userId) {
+    return res.status(403).json({ error: "Not your call to accept." });
+  }
+
+  call.status = "connected";
+  call.updatedAt = new Date().toISOString();
+  await saveDB(db);
+  res.json({ call });
+});
+
+app.post("/api/calls/:id/decline", requireAuth, async (req, res) => {
+  const callId = req.params.id;
+  const db = await loadDB();
+  const call = db.calls.find((c) => c.id === callId);
+  const userId = req.session.userId;
+
+  if (!call) return res.status(404).json({ error: "Call not found." });
+  if (call.toUserId !== userId && call.fromUserId !== userId) {
+    return res.status(403).json({ error: "Not your call." });
+  }
+
+  call.status = "ended";
+  call.updatedAt = new Date().toISOString();
+  await saveDB(db);
+  res.json({ call });
+});
 
 app.post("/api/admin/login", async (req, res) => {
   const { password } = req.body || {};
@@ -402,21 +453,25 @@ app.delete("/api/admin/users/:id", requireAdmin, async (req, res) => {
     return res.status(404).json({ error: "User not found." });
   }
 
-  const chatsToDelete = db.chats.filter((c) => c.ownerId === userId).map((c) => c.id);
+  const chatsToDelete = db.chats
+    .filter((c) => (c.participantIds || []).includes(userId))
+    .map((c) => c.id);
+
   db.users.splice(userIndex, 1);
-  db.chats = db.chats.filter((c) => c.ownerId !== userId);
+  db.chats = db.chats.filter((c) => !(c.participantIds || []).includes(userId));
   db.messages = db.messages.filter((m) => !chatsToDelete.includes(m.chatId));
+  db.calls = db.calls.filter(
+    (call) => call.fromUserId !== userId && call.toUserId !== userId
+  );
 
   await saveDB(db);
   res.json({ ok: true });
 });
-
-// -------- SPA fallback --------
 
 app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
 app.listen(PORT, () => {
-  console.log(`Talky (GitHub-backed) running on http://localhost:${PORT}`);
+  console.log(`Talky (GitHub-backed, encrypted) running on http://localhost:${PORT}`);
 });

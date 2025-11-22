@@ -1,7 +1,7 @@
 {
-  "name": "talky-github-demo",
+  "name": "talky-github-secure",
   "version": "1.0.0",
-  "description": "Talky Node.js app with GitHub-backed JSON storage",
+  "description": "Talky Node.js app with GitHub-backed JSON storage, encrypted chats, and basic call signaling",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
