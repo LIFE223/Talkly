@@ -1475,650 +1475,147 @@ refreshMe();
   } catch {}
 })();
 
-// ---------- In-page modal helpers (replace prompt/confirm/alert) ----------
-function createModalOverlay() {
-  const overlay = document.createElement("div");
-  overlay.className = "modal-overlay";
-  const dialog = document.createElement("div");
-  dialog.className = "modal-dialog";
-  overlay.appendChild(dialog);
-  return { overlay, dialog };
+// ---------- Missing Polling Functions ----------
+function startPendingCallPolling() {
+  if (pendingCallPollTimer) clearInterval(pendingCallPollTimer);
+  pollPendingCalls(); // run immediately
+  pendingCallPollTimer = setInterval(pollPendingCalls, 3000);
 }
 
-function showAlert(title, message) {
-  return new Promise((resolve) => {
-    const { overlay, dialog } = createModalOverlay();
-    const header = document.createElement("div");
-    header.className = "modal-header";
-    const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Notice";
-    const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
-    closeX.addEventListener("click", () => { document.body.removeChild(overlay); resolve(); });
-    header.appendChild(t); header.appendChild(closeX);
+function stopPendingCallPolling() {
+  if (pendingCallPollTimer) clearInterval(pendingCallPollTimer);
+  pendingCallPollTimer = null;
+}
 
-    const body = document.createElement("div");
-    body.style.marginTop = "8px";
-    body.textContent = message || "";
+// ---------- Event Wiring & Logic ----------
 
-    const actions = document.createElement("div"); actions.className = "modal-actions";
-    const ok = document.createElement("button"); ok.className = "btn btn-primary"; ok.textContent = "OK";
-    ok.addEventListener("click", () => { document.body.removeChild(overlay); resolve(); });
+if (btnNewChat) {
+  btnNewChat.addEventListener("click", openNewChatModal);
+}
 
-    actions.appendChild(ok);
-    dialog.appendChild(header);
-    dialog.appendChild(body);
-    dialog.appendChild(actions);
-    document.body.appendChild(overlay);
+if (btnChatSend) {
+  btnChatSend.addEventListener("click", sendMessage);
+}
+
+if (chatInput) {
+  chatInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") sendMessage();
   });
 }
 
-function showConfirm(title, message) {
-  return new Promise((resolve) => {
-    const { overlay, dialog } = createModalOverlay();
-    const header = document.createElement("div");
-    header.className = "modal-header";
-    const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Confirm";
-    const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
-    closeX.addEventListener("click", () => { document.body.removeChild(overlay); resolve(false); });
-    header.appendChild(t); header.appendChild(closeX);
-
-    const body = document.createElement("div");
-    body.style.marginTop = "8px";
-    body.textContent = message || "";
-
-    const actions = document.createElement("div"); actions.className = "modal-actions";
-    const no = document.createElement("button"); no.className = "btn-pill"; no.textContent = "No";
-    const yes = document.createElement("button"); yes.className = "btn btn-primary"; yes.textContent = "Yes";
-    no.addEventListener("click", () => { document.body.removeChild(overlay); resolve(false); });
-    yes.addEventListener("click", () => { document.body.removeChild(overlay); resolve(true); });
-
-    actions.appendChild(no);
-    actions.appendChild(yes);
-    dialog.appendChild(header);
-    dialog.appendChild(body);
-    dialog.appendChild(actions);
-    document.body.appendChild(overlay);
-  });
+if (videoCallBtn) {
+  videoCallBtn.addEventListener("click", () => openCallStartDialog("video"));
 }
 
-function showPrompt(title, label, opts = {}) {
-  // opts: { placeholder, textarea, rows }
-  return new Promise((resolve) => {
-    const { overlay, dialog } = createModalOverlay();
-    const header = document.createElement("div");
-    header.className = "modal-header";
-    const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Input";
-    const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
-    closeX.addEventListener("click", () => { document.body.removeChild(overlay); resolve(null); });
-    header.appendChild(t); header.appendChild(closeX);
-
-    const body = document.createElement("div");
-    body.className = "modal-row";
-    const lbl = document.createElement("div"); lbl.textContent = label || "";
-    let input;
-    if (opts.textarea) {
-      input = document.createElement("textarea");
-      input.rows = opts.rows || 3;
-      input.style.resize = "vertical";
-    } else {
-      input = document.createElement("input");
-      input.type = "text";
-    }
-    input.placeholder = opts.placeholder || "";
-    body.appendChild(lbl);
-    body.appendChild(input);
-
-    const actions = document.createElement("div"); actions.className = "modal-actions";
-    const cancel = document.createElement("button"); cancel.className = "btn-pill"; cancel.textContent = "Cancel";
-    const ok = document.createElement("button"); ok.className = "btn btn-primary"; ok.textContent = "OK";
-
-    cancel.addEventListener("click", () => { document.body.removeChild(overlay); resolve(null); });
-    ok.addEventListener("click", () => { document.body.removeChild(overlay); resolve(input.value.trim()); });
-
-    actions.appendChild(cancel); actions.appendChild(ok);
-    dialog.appendChild(header); dialog.appendChild(body); dialog.appendChild(actions);
-    document.body.appendChild(overlay);
-
-    // focus
-    setTimeout(() => input.focus(), 50);
-  });
+if (audioCallBtn) {
+  audioCallBtn.addEventListener("click", () => openCallStartDialog("audio"));
 }
 
-// Helper to show a modal with a copyable key (used after creating/rotating)
-function showCopyableKeyModal(title, key) {
-  const { overlay, dialog } = createModalOverlay();
-  const header = document.createElement("div");
-  header.className = "modal-header";
-  const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Chat key";
-  const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
-  closeX.addEventListener("click", () => { document.body.removeChild(overlay); });
-  header.appendChild(t); header.appendChild(closeX);
+async function sendMessage() {
+  const text = chatInput.value.trim();
+  if (!text || !activeChatId) return;
 
-  const body = document.createElement("div");
-  body.className = "modal-row";
-  const lbl = document.createElement("div"); lbl.textContent = "Share this key with participants (they need it to decrypt):";
-  const copyRow = document.createElement("div"); copyRow.className = "copy-code-row";
-  const txt = document.createElement("textarea"); txt.readOnly = true; txt.rows = 2; txt.value = key; txt.style.flex = "1";
-  const btn = document.createElement("button"); btn.className = "btn-copy"; btn.textContent = "Copy";
-  btn.addEventListener("click", async () => {
-    try {
-      await navigator.clipboard.writeText(txt.value);
-      btn.textContent = "Copied";
-      setTimeout(() => (btn.textContent = "Copy"), 1500);
-    } catch {
-      txt.select();
-      document.execCommand("copy");
-      btn.textContent = "Copied";
-      setTimeout(() => (btn.textContent = "Copy"), 1500);
-    }
-  });
-  copyRow.appendChild(txt); copyRow.appendChild(btn);
-  body.appendChild(lbl); body.appendChild(copyRow);
-
-  const actions = document.createElement("div"); actions.className = "modal-actions";
-  const ok = document.createElement("button"); ok.className = "btn btn-primary"; ok.textContent = "Done";
-  ok.addEventListener("click", () => { document.body.removeChild(overlay); });
-  actions.appendChild(ok);
-
-  dialog.appendChild(header); dialog.appendChild(body); dialog.appendChild(actions);
-  document.body.appendChild(overlay);
-}
-
-// ---------- Replace browser popups with modals in flows ----------
-
-// Replace importKeyForChat to use in-page prompt
-async function importKeyForChat(chat) {
-  const code = await showPrompt("Import chat key", "Paste the chat key code for this conversation (the letters + emojis).", { textarea: true, rows: 2 });
-  if (!code) return;
-  try {
-    const keyBytes = await deriveKeyBytesFromCode(code);
-    const hashHex = bytesToHex(keyBytes);
-    const expected = chat.encryption && chat.encryption.keyHash;
-    if (!expected) {
-      await showAlert("Import failed", "This chat does not have encryption metadata.");
-      return;
-    }
-    if (hashHex !== expected) {
-      await showAlert("Import failed", "That key does not match this chat.");
-      return;
-    }
-    if (!chatKeyCache[chat.id]) chatKeyCache[chat.id] = {};
-    chatKeyCache[chat.id].code = code;
-    saveChatKeyCache();
-    await showAlert("Success", "Chat key saved. Reloading messages...");
-    await loadChats();
-    const c = chats.find((x) => x.id === chat.id);
-    if (c) renderChatDetail(c);
-  } catch (e) {
-    await showAlert("Error", "Failed to import key: " + (e.message || e));
-  }
-}
-
-// Replace new-chat modal's use of prompt in call start flow (where used earlier)
-async function openCallStartDialog(type) {
-  if (!currentUser) {
-    alert("Log in first.");
-    return;
-  }
-
-  const container = document.createElement("div");
-  container.style.display = "flex";
-  container.style.flexDirection = "column";
-  container.style.gap = "10px";
-
-  const label1 = document.createElement("div");
-  label1.textContent = "Start a call with:";
-  label1.style.fontSize = "13px";
-
-  const select = document.createElement("select");
-  select.style.width = "100%";
-  select.style.padding = "6px";
-  select.style.borderRadius = "10px";
-  select.style.border = "1px solid #e5e5ea";
-  const optionNone = document.createElement("option");
-  optionNone.value = "";
-  optionNone.textContent = "— Pick from your chats —";
-  select.appendChild(optionNone);
-
-  chats.forEach((chat) => {
-    const others = (chat.participantIds || []).filter(
-      (id) => currentUser && id !== currentUser.id
-    );
-    if (!others.length) return;
-    const opt = document.createElement("option");
-    opt.value = chat.id;
-    opt.textContent = `${chat.name} (${chat.type === "group" ? "group" : "dm"})`;
-    select.appendChild(opt);
-  });
-
-  const orDiv = document.createElement("div");
-  orDiv.style.fontSize = "11px";
-  orDiv.style.color = "#999";
-  orDiv.textContent = "or call by username:";
-
-  const usernameInput = document.createElement("input");
-  usernameInput.type = "text";
-  usernameInput.placeholder = "Username (exact)";
-  usernameInput.style.width = "100%";
-  usernameInput.style.padding = "8px";
-  usernameInput.style.borderRadius = "10px";
-  usernameInput.style.border = "1px solid #e5e5ea";
-
-  const startBtn = document.createElement("button");
-  startBtn.className = "btn btn-primary";
-  startBtn.textContent = type === "video" ? "Start video call" : "Start audio call";
-  startBtn.style.marginTop = "4px";
-
-  // replace the click handler body to play dialing tone and stop when accepted/failed
-  startBtn.addEventListener("click", async () => {
-    let toUsername = usernameInput.value.trim();
-    let chatId = null;
-
-    if (!toUsername && select.value) {
-      const chat = chats.find((c) => c.id === select.value);
-      if (!chat) {
-        await showAlert("Error", "Chat not found.");
-        return;
-      }
-      const others = (chat.participantIds || []).filter(
-        (id) => currentUser && id !== currentUser.id
-      );
-      if (!others.length) {
-        await showAlert("Error", "This chat has no other users.");
-        return;
-      }
-      const picked = await showPrompt(
-        "Pick username",
-        "This chat may include multiple users. Enter the username you want to call from this chat:"
-      );
-      if (!picked) return;
-      toUsername = picked;
-      chatId = chat.id;
-    } else if (!toUsername && !select.value) {
-      alert("Select a chat or type a username.");
-      return;
-    }
-
-    try {
-      playDialTone();
-      const res = await jsonFetch("/api/calls", {
-        method: "POST",
-        body: JSON.stringify({ toUsername, type, chatId })
-      });
-      const call = res.call;
-      
-      const screen = buildCallScreen(toUsername, type, "Calling...");
-      openCallOverlayLayout(type, "Calling", screen);
-
-      // Poll for acceptance
-      const pollAccept = setInterval(async () => {
-        try {
-          const cRes = await jsonFetch(`/api/calls/${call.id}`);
-          if (cRes.call && cRes.call.status === "connected") {
-            clearInterval(pollAccept);
-            stopTone();
-            const inCallScreen = buildCallScreen(toUsername, type, "Connected");
-            openCallOverlayLayout(type, "In Call", inCallScreen);
-            startWebRTC(true, call.id, type); // Caller starts WebRTC
-          } else if (cRes.call && cRes.call.status === "ended") {
-            clearInterval(pollAccept);
-            stopTone();
-            closeCallOverlay();
-            alert("Call declined or ended.");
-          }
-        } catch {}
-      }, 1000);
-
-    } catch (err) {
-      stopTone();
-      alert(err.message || "Failed to start call.");
-    }
-  });
-
-  container.appendChild(label1);
-  container.appendChild(select);
-  container.appendChild(orDiv);
-  container.appendChild(usernameInput);
-  container.appendChild(startBtn);
-
-  openCallOverlayLayout(type, type === "video" ? "Video Call" : "Audio Call", container);
-}
-
-// Poll for incoming calls (play ringtone + show notification)
-async function pollPendingCalls() {
-  if (!currentUser) return;
-  try {
-    const res = await jsonFetch("/api/calls/pending");
-    const calls = res.calls || [];
-    if (!calls.length) return;
-    const call = calls[0];
-
-    // Avoid re-ringing for same call
-    if (currentCallId === call.id) return;
-
-    playRingtone();
-
-    const acceptBtn = document.createElement("button");
-    acceptBtn.className = "btn btn-primary";
-    acceptBtn.textContent = "Accept";
-    acceptBtn.addEventListener("click", async () => {
-      stopTone();
-      await jsonFetch(`/api/calls/${encodeURIComponent(call.id)}/accept`, { method: "POST" });
-      const inCallScreen = buildCallScreen(`User ${call.fromUserId}`, call.type, "Connected");
-      openCallOverlayLayout(call.type, "In Call", inCallScreen);
-      startWebRTC(false, call.id, call.type); // Callee starts WebRTC
-    });
-
-    const declineBtn = document.createElement("button");
-    declineBtn.className = "btn-pill";
-    declineBtn.textContent = "Decline";
-    declineBtn.addEventListener("click", async () => {
-      stopTone();
-      await jsonFetch(`/api/calls/${encodeURIComponent(call.id)}/decline`, { method: "POST" });
-      closeCallOverlay();
-    });
-
-    const screen = buildCallScreen(`User ${call.fromUserId}`, call.type, "Incoming Call...", [acceptBtn, declineBtn]);
-    // Remove the default end button from buildCallScreen for incoming view if desired, or keep it
-    openCallOverlayLayout(call.type, "Incoming Call", screen);
-
-  } catch (err) { console.error(err); }
-}
-
-// ---------- integrate settings & tone stop on overlay close ----------
-callDialogClose.addEventListener("click", () => {
-  stopTone();
-  closeCallOverlay();
-});
-callOverlay.addEventListener("click", (e) => {
-  if (e.target === callOverlay) {
-    stopTone();
-    closeCallOverlay();
-  }
-});
-
-// ---------- Admin secret menu ----------
-document.addEventListener("keydown", async (e) => {
-  const onLoginScreen =
-    !authScreen.classList.contains("hidden") &&
-    mainScreen.classList.contains("hidden");
-
-  if (
-    onLoginScreen &&
-    e.key.toLowerCase() === "z" &&
-    e.ctrlKey &&
-    e.altKey &&
-    e.shiftKey
-  ) {
-    e.preventDefault();
-    await openAdminMenu();
-  }
-});
-
-async function openAdminMenu() {
-  if (isAdminOpen) return;
-
-  const pass = prompt("Enter admin password:");
-  if (!pass) return;
+  const chat = chats.find((c) => c.id === activeChatId);
+  if (!chat) return;
 
   try {
-    await jsonFetch("/api/admin/login", {
+    // Encrypt
+    const { ciphertext, iv } = await encryptMessageForChat(chat.id, text);
+    
+    // Send
+    await jsonFetch("/api/messages", {
       method: "POST",
-      body: JSON.stringify({ password: pass })
+      body: JSON.stringify({ chatId: chat.id, ciphertext, iv })
     });
+
+    chatInput.value = "";
+    await loadChats(); // Refresh UI
   } catch (err) {
-    alert(err.message || "Admin login failed.");
-    return;
-  }
-
-  isAdminOpen = true;
-  adminOverlay.classList.remove("hidden");
-  await loadAdminUsers();
-}
-
-adminClose.addEventListener("click", () => {
-  adminOverlay.classList.add("hidden");
-  isAdminOpen = false;
-});
-
-adminOverlay.addEventListener("click", (e) => {
-  if (e.target === adminOverlay) {
-    adminOverlay.classList.add("hidden");
-    isAdminOpen = false;
-  }
-});
-
-async function loadAdminUsers() {
-  adminBody.innerHTML = "Loading users…";
-  try {
-    const res = await jsonFetch("/api/admin/users");
-    const users = res.users || [];
-    if (!users.length) {
-      adminBody.innerHTML =
-        "<div style='font-size:12px;color:#999'>No users yet.</div>";
-      return;
-    }
-    const container = document.createElement("div");
-    users.forEach((u) => {
-      const row = document.createElement("div");
-      row.className = "admin-row";
-
-      const main = document.createElement("div");
-      main.className = "admin-user-main";
-
-      const name = document.createElement("div");
-      name.className = "admin-user-name";
-      name.textContent = `${u.username} (${u.id})`;
-
-      const meta = document.createElement("div");
-      meta.className = "admin-user-meta";
-      meta.textContent = `Joined: ${new Date(u.createdAt).toLocaleString()}`;
-
-      main.appendChild(name);
-      main.appendChild(meta);
-
-      const right = document.createElement("div");
-      right.style.display = "flex";
-      right.style.alignItems = "center";
-      right.style.gap = "6px";
-
-      if (u.isAdmin) {
-        const badge = document.createElement("span");
-        badge.className = "admin-badge-admin";
-        badge.textContent = "Admin";
-        right.appendChild(badge);
-      }
-
-      const delBtn = document.createElement("button");
-      delBtn.className = "admin-delete-btn";
-      delBtn.textContent = "Delete";
-      delBtn.addEventListener("click", async () => {
-        if (
-          !confirm(
-            `Delete user ${u.username}? This removes their chats, messages, and calls.`
-          )
-        ) {
-          return;
-        }
-        try {
-          await jsonFetch(`/api/admin/users/${encodeURIComponent(u.id)}`, {
-            method: "DELETE"
-          });
-          await loadAdminUsers();
-        } catch (err) {
-          alert(err.message || "Failed to delete user.");
-        }
-      });
-
-      right.appendChild(delBtn);
-
-      row.appendChild(main);
-      row.appendChild(right);
-      container.appendChild(row);
-    });
-    adminBody.innerHTML = "";
-    adminBody.appendChild(container);
-  } catch (err) {
-    console.error("Failed to load admin users:", err);
-    adminBody.innerHTML =
-      "<div style='font-size:12px;color:#b00'>Failed to load users.</div>";
+    console.error(err);
+    await showAlert("Error", "Failed to send message: " + err.message);
   }
 }
 
-// ---------- Init ----------
-switchAuthTab("login");
-refreshMe();
-
-// Ensure we request notification permission on startup for better UX
-(async () => {
-  try {
-    await ensureNotifications();
-  } catch {}
-})();
-
-// ---------- In-page modal helpers (replace prompt/confirm/alert) ----------
-function createModalOverlay() {
-  const overlay = document.createElement("div");
-  overlay.className = "modal-overlay";
-  const dialog = document.createElement("div");
-  dialog.className = "modal-dialog";
-  overlay.appendChild(dialog);
-  return { overlay, dialog };
-}
-
-function showAlert(title, message) {
-  return new Promise((resolve) => {
-    const { overlay, dialog } = createModalOverlay();
-    const header = document.createElement("div");
-    header.className = "modal-header";
-    const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Notice";
-    const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
-    closeX.addEventListener("click", () => { document.body.removeChild(overlay); resolve(); });
-    header.appendChild(t); header.appendChild(closeX);
-
-    const body = document.createElement("div");
-    body.style.marginTop = "8px";
-    body.textContent = message || "";
-
-    const actions = document.createElement("div"); actions.className = "modal-actions";
-    const ok = document.createElement("button"); ok.className = "btn btn-primary"; ok.textContent = "OK";
-    ok.addEventListener("click", () => { document.body.removeChild(overlay); resolve(); });
-
-    actions.appendChild(ok);
-    dialog.appendChild(header);
-    dialog.appendChild(body);
-    dialog.appendChild(actions);
-    document.body.appendChild(overlay);
-  });
-}
-
-function showConfirm(title, message) {
-  return new Promise((resolve) => {
-    const { overlay, dialog } = createModalOverlay();
-    const header = document.createElement("div");
-    header.className = "modal-header";
-    const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Confirm";
-    const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
-    closeX.addEventListener("click", () => { document.body.removeChild(overlay); resolve(false); });
-    header.appendChild(t); header.appendChild(closeX);
-
-    const body = document.createElement("div");
-    body.style.marginTop = "8px";
-    body.textContent = message || "";
-
-    const actions = document.createElement("div"); actions.className = "modal-actions";
-    const no = document.createElement("button"); no.className = "btn-pill"; no.textContent = "No";
-    const yes = document.createElement("button"); yes.className = "btn btn-primary"; yes.textContent = "Yes";
-    no.addEventListener("click", () => { document.body.removeChild(overlay); resolve(false); });
-    yes.addEventListener("click", () => { document.body.removeChild(overlay); resolve(true); });
-
-    actions.appendChild(no);
-    actions.appendChild(yes);
-    dialog.appendChild(header);
-    dialog.appendChild(body);
-    dialog.appendChild(actions);
-    document.body.appendChild(overlay);
-  });
-}
-
-function showPrompt(title, label, opts = {}) {
-  // opts: { placeholder, textarea, rows }
-  return new Promise((resolve) => {
-    const { overlay, dialog } = createModalOverlay();
-    const header = document.createElement("div");
-    header.className = "modal-header";
-    const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Input";
-    const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
-    closeX.addEventListener("click", () => { document.body.removeChild(overlay); resolve(null); });
-    header.appendChild(t); header.appendChild(closeX);
-
-    const body = document.createElement("div");
-    body.className = "modal-row";
-    const lbl = document.createElement("div"); lbl.textContent = label || "";
-    let input;
-    if (opts.textarea) {
-      input = document.createElement("textarea");
-      input.rows = opts.rows || 3;
-      input.style.resize = "vertical";
-    } else {
-      input = document.createElement("input");
-      input.type = "text";
-    }
-    input.placeholder = opts.placeholder || "";
-    body.appendChild(lbl);
-    body.appendChild(input);
-
-    const actions = document.createElement("div"); actions.className = "modal-actions";
-    const cancel = document.createElement("button"); cancel.className = "btn-pill"; cancel.textContent = "Cancel";
-    const ok = document.createElement("button"); ok.className = "btn btn-primary"; ok.textContent = "OK";
-
-    cancel.addEventListener("click", () => { document.body.removeChild(overlay); resolve(null); });
-    ok.addEventListener("click", () => { document.body.removeChild(overlay); resolve(input.value.trim()); });
-
-    actions.appendChild(cancel); actions.appendChild(ok);
-    dialog.appendChild(header); dialog.appendChild(body); dialog.appendChild(actions);
-    document.body.appendChild(overlay);
-
-    // focus
-    setTimeout(() => input.focus(), 50);
-  });
-}
-
-// Helper to show a modal with a copyable key (used after creating/rotating)
-function showCopyableKeyModal(title, key) {
+async function openNewChatModal() {
   const { overlay, dialog } = createModalOverlay();
+  
   const header = document.createElement("div");
   header.className = "modal-header";
-  const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Chat key";
-  const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
-  closeX.addEventListener("click", () => { document.body.removeChild(overlay); });
-  header.appendChild(t); header.appendChild(closeX);
+  const title = document.createElement("div");
+  title.className = "modal-title";
+  title.textContent = "New Chat";
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "call-end-btn";
+  closeBtn.textContent = "✕";
+  closeBtn.addEventListener("click", () => document.body.removeChild(overlay));
+  header.appendChild(title);
+  header.appendChild(closeBtn);
 
   const body = document.createElement("div");
-  body.className = "modal-row";
-  const lbl = document.createElement("div"); lbl.textContent = "Share this key with participants (they need it to decrypt):";
-  const copyRow = document.createElement("div"); copyRow.className = "copy-code-row";
-  const txt = document.createElement("textarea"); txt.readOnly = true; txt.rows = 2; txt.value = key; txt.style.flex = "1";
-  const btn = document.createElement("button"); btn.className = "btn-copy"; btn.textContent = "Copy";
-  btn.addEventListener("click", async () => {
+  
+  // Name input
+  const row1 = document.createElement("div");
+  row1.className = "modal-row";
+  const lbl1 = document.createElement("div"); lbl1.textContent = "Chat Name";
+  const inpName = document.createElement("input"); inpName.type = "text"; inpName.placeholder = "e.g. Team Project";
+  row1.appendChild(lbl1); row1.appendChild(inpName);
+
+  // Participants input
+  const row2 = document.createElement("div");
+  row2.className = "modal-row";
+  const lbl2 = document.createElement("div"); lbl2.textContent = "Participants (usernames or IDs, comma separated)";
+  const inpPart = document.createElement("input"); inpPart.type = "text"; inpPart.placeholder = "alice, bob, u_12345";
+  row2.appendChild(lbl2); row2.appendChild(inpPart);
+
+  body.appendChild(row1);
+  body.appendChild(row2);
+
+  const actions = document.createElement("div");
+  actions.className = "modal-actions";
+  const createBtn = document.createElement("button");
+  createBtn.className = "btn btn-primary";
+  createBtn.textContent = "Create";
+  
+  createBtn.addEventListener("click", async () => {
+    const name = inpName.value.trim();
+    const rawPart = inpPart.value.trim();
+    if (!name) { alert("Name required"); return; }
+    if (!rawPart) { alert("Participants required"); return; }
+
+    const participants = rawPart.split(",").map(s => s.trim()).filter(Boolean);
+    
     try {
-      await navigator.clipboard.writeText(txt.value);
-      btn.textContent = "Copied";
-      setTimeout(() => (btn.textContent = "Copy"), 1500);
-    } catch {
-      txt.select();
-      document.execCommand("copy");
-      btn.textContent = "Copied";
-      setTimeout(() => (btn.textContent = "Copy"), 1500);
+      // 1. Generate key
+      const code = generateChatKeyCode();
+      const keyBytes = await deriveKeyBytesFromCode(code);
+      const hashHex = bytesToHex(keyBytes);
+
+      // 2. Create chat
+      const res = await jsonFetch("/api/chats", {
+        method: "POST",
+        body: JSON.stringify({ name, participants, encryptionKeyHash: hashHex })
+      });
+
+      // 3. Save key locally
+      if (!chatKeyCache[res.chat.id]) chatKeyCache[res.chat.id] = {};
+      chatKeyCache[res.chat.id].code = code;
+      saveChatKeyCache();
+
+      // 4. Close & Refresh
+      document.body.removeChild(overlay);
+      await loadChats();
+      
+      // 5. Show key
+      showCopyableKeyModal("Chat Created", code);
+      
+    } catch (e) {
+      alert(e.message);
     }
   });
-  copyRow.appendChild(txt); copyRow.appendChild(btn);
-  body.appendChild(lbl); body.appendChild(copyRow);
 
-  const actions = document.createElement("div"); actions.className = "modal-actions";
-  const ok = document.createElement("button"); ok.className = "btn btn-primary"; ok.textContent = "Done";
-  ok.addEventListener("click", () => { document.body.removeChild(overlay); });
-  actions.appendChild(ok);
-
-  dialog.appendChild(header); dialog.appendChild(body); dialog.appendChild(actions);
+  actions.appendChild(createBtn);
+  dialog.appendChild(header);
+  dialog.appendChild(body);
+  dialog.appendChild(actions);
   document.body.appendChild(overlay);
 }
