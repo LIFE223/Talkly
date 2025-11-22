@@ -19,6 +19,9 @@ if (!fetch) {
 
 const app = express();
 
+// In-memory store for WebRTC signals to avoid GitHub rate limits/latency
+const signalStore = {};
+
 const PORT = process.env.PORT || 3000;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_OWNER = process.env.GITHUB_OWNER;
@@ -479,6 +482,10 @@ app.post("/api/calls/:id/decline", requireAuth, async (req, res) => {
   call.status = "ended";
   call.updatedAt = new Date().toISOString();
   await saveDB(db);
+
+  // Cleanup signals
+  delete signalStore[callId];
+
   res.json({ call });
 });
 
@@ -595,38 +602,29 @@ app.post("/api/admin/pause", requireAdmin, async (req, res) => {
 });
 
 // Add signaling endpoint for WebRTC (In-memory only to avoid GitHub rate limits)
-app.post("/api/calls/:id/signal", requireAuth, async (req, res) => {
+app.post("/api/calls/:id/signal", requireAuth, (req, res) => {
   const callId = req.params.id;
   const { type, data } = req.body || {};
-  const db = await loadDB();
-  const call = db.calls.find((c) => c.id === callId);
   
-  if (!call) return res.status(404).json({ error: "Call not found" });
+  // Use in-memory store instead of loading DB
+  if (!signalStore[callId]) signalStore[callId] = [];
   
-  // Initialize signals array if missing
-  if (!call.signals) call.signals = [];
-  
-  // Store signal in memory
-  call.signals.push({ 
+  signalStore[callId].push({ 
     type, 
     data, 
     fromUserId: req.session.userId, 
     ts: Date.now() 
   });
   
-  // Note: We do NOT await saveDB(db) here to ensure speed and avoid rate limits
   res.json({ ok: true });
 });
 
-app.get("/api/calls/:id/signal", requireAuth, async (req, res) => {
+app.get("/api/calls/:id/signal", requireAuth, (req, res) => {
   const callId = req.params.id;
   const since = parseInt(req.query.since || "0");
-  const db = await loadDB();
-  const call = db.calls.find((c) => c.id === callId);
   
-  if (!call) return res.status(404).json({ error: "Call not found" });
-  
-  const signals = (call.signals || []).filter(s => s.ts > since && s.fromUserId !== req.session.userId);
+  // Read from in-memory store
+  const signals = (signalStore[callId] || []).filter(s => s.ts > since && s.fromUserId !== req.session.userId);
   res.json({ signals });
 });
 
