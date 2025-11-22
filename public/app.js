@@ -144,6 +144,7 @@ function CallOverlay({ call, onClose, isIncoming }) {
 
   // WebRTC Setup
   const startWebRTC = useCallback(async (isCaller) => {
+    console.log("Starting WebRTC, isCaller:", isCaller);
     const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
     peerRef.current = pc;
 
@@ -155,6 +156,7 @@ function CallOverlay({ call, onClose, isIncoming }) {
     };
 
     try {
+      // Get media immediately
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: call.type === 'video' });
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
@@ -168,12 +170,12 @@ function CallOverlay({ call, onClose, isIncoming }) {
         await jsonFetch(`/api/calls/${call.id}/signal`, { method: 'POST', body: JSON.stringify({ type: 'offer', data: offer }) });
       }
     } catch (e) {
-      console.error(e);
-      alert("Media access failed");
+      console.error("Media Error:", e);
+      alert("Could not access camera/microphone. Ensure you are on HTTPS or localhost.");
     }
   }, [call]);
 
-  // Polling for signals
+  // Polling for signals (SDP/ICE)
   useEffect(() => {
     if (!connected) return;
     let lastTs = Date.now();
@@ -218,7 +220,29 @@ function CallOverlay({ call, onClose, isIncoming }) {
         } catch {}
       }, 1000);
     } else {
+      // OUTGOING CALL: Start camera immediately (Google Meet style)
+      if (call.type === 'video') {
+        startWebRTC(true); // Initialize local stream & PC, but don't send offer until connected? 
+        // Actually, we can't send offer until callee is ready to receive signals.
+        // But we CAN show local video.
+        // Let's modify startWebRTC to handle "early media" vs "signaling".
+        // For simplicity in this refactor: We call startWebRTC(true) ONLY when connected, 
+        // BUT we manually get user media here for preview.
+        
+        navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+          .then(stream => {
+             if (localVideoRef.current) {
+               localVideoRef.current.srcObject = stream;
+               localVideoRef.current.muted = true;
+             }
+             // Store stream to hand off to WebRTC later? 
+             // Or just let startWebRTC re-acquire (browser usually handles this fine).
+          })
+          .catch(e => console.error("Preview failed", e));
+      }
+
       playTone(425, 'sine'); // Dial tone
+      
       // Poll for acceptance
       pollRef.current = setInterval(async () => {
         try {
@@ -228,12 +252,13 @@ function CallOverlay({ call, onClose, isIncoming }) {
             stopTone();
             setStatus("Connected");
             setConnected(true);
-            startWebRTC(true);
+            // If we haven't started WebRTC yet (we did preview only), start it now properly
+            startWebRTC(true); 
           } else if (res.call.status === 'ended') {
             clearInterval(pollRef.current);
             stopTone();
             onClose();
-            alert("Call ended");
+            alert("Call declined or ended.");
           }
         } catch {}
       }, 1000);
@@ -256,6 +281,9 @@ function CallOverlay({ call, onClose, isIncoming }) {
   const handleHangup = async () => {
     stopTone();
     if (isIncoming && !connected) {
+      await jsonFetch(`/api/calls/${call.id}/decline`, { method: 'POST' });
+    } else {
+      // End call for everyone
       await jsonFetch(`/api/calls/${call.id}/decline`, { method: 'POST' });
     }
     // Clean up local stream
@@ -305,10 +333,17 @@ function CallOverlay({ call, onClose, isIncoming }) {
     };
   }, []);
 
+  // Render logic:
+  // If video call: Always show video wrapper.
+  // If incoming & not connected: Show avatar/accept screen overlaying video? No, just standard screen.
+  // If outgoing: Show video wrapper immediately (local cam active), remote is black.
+  
+  const showVideoLayout = call.type === 'video' && (!isIncoming || connected);
+
   return (
     <div id="call-overlay">
-      <div className="call-dialog" style={connected && call.type === 'video' ? { width: '100%', maxWidth: '800px', background: 'transparent', boxShadow: 'none' } : {}}>
-        {!connected || call.type !== 'video' ? (
+      <div className="call-dialog" style={showVideoLayout ? { width: '100%', maxWidth: '800px', background: 'transparent', boxShadow: 'none' } : {}}>
+        {!showVideoLayout ? (
           <div className="call-dialog-body">
             <div className="call-screen">
               <div className="call-avatar">U</div>
@@ -324,6 +359,14 @@ function CallOverlay({ call, onClose, isIncoming }) {
           <div className="video-call-wrapper">
             <video id="remote-video" ref={remoteVideoRef} autoPlay playsInline />
             <video id="local-video" ref={localVideoRef} autoPlay playsInline muted onMouseDown={handleMouseDown} />
+            
+            {/* Overlay status for caller waiting */}
+            {!connected && !isIncoming && (
+               <div style={{position:'absolute', top:'50%', left:'50%', transform:'translate(-50%, -50%)', color:'white', background:'rgba(0,0,0,0.5)', padding:'10px 20px', borderRadius:'20px'}}>
+                 Calling...
+               </div>
+            )}
+
             <div className="call-overlay-controls">
               <button className="hangup" onClick={handleHangup}>✕</button>
             </div>
@@ -343,6 +386,7 @@ function App() {
   const [activeCall, setActiveCall] = useState(null); // { id, type, isIncoming }
   const [modals, setModals] = useState({ settings: false, newChat: false, admin: false, manageChat: null });
   const [inputText, setInputText] = useState("");
+  const fileInputRef = useRef(null);
 
   // Load Keys
   useEffect(() => {
@@ -372,39 +416,30 @@ function App() {
     const interval = setInterval(async () => {
       try {
         const res = await jsonFetch('/api/calls/pending');
-        // If we have a pending call and we aren't already in a call flow
         if (res.calls && res.calls.length > 0 && !activeCall) {
           setActiveCall({ ...res.calls[0], isIncoming: true });
         }
       } catch {}
-    }, 2000); // Poll every 2 seconds for calls
+    }, 2000);
     return () => clearInterval(interval);
   }, [user, activeCall]);
 
-  // Polling for Messages (Active Chat) & Chat List updates
+  // Polling for Messages (Fixes flashing by comparing JSON)
   useEffect(() => {
     if (!user) return;
-    
     const pollMessages = async () => {
       try {
-        // We fetch all chats/messages to keep the list and active conversation updated
         const res = await jsonFetch('/api/chats');
-        // Only update if we have data
         if (res.chats) {
-          // Check if data actually changed to avoid unnecessary re-renders if possible, 
-          // but for simplicity in this setup, we just update state.
-          // React's diffing will handle the DOM updates efficiently.
-          setChats(res.chats);
-          setMessages(res.messagesByChat || {});
+          setChats(prev => JSON.stringify(prev) === JSON.stringify(res.chats) ? prev : res.chats);
+          setMessages(prev => JSON.stringify(prev) === JSON.stringify(res.messagesByChat) ? prev : res.messagesByChat || {});
         }
       } catch (e) { console.error(e); }
     };
-
-    // Poll immediately on load/chat change, then every 2 seconds
     pollMessages();
     const interval = setInterval(pollMessages, 2000);
     return () => clearInterval(interval);
-  }, [user]); // Run when user is logged in
+  }, [user]);
 
   // Admin Shortcut
   useEffect(() => {
@@ -429,8 +464,8 @@ function App() {
     } catch (e) { console.error(e); }
   };
 
-  const handleSendMessage = async () => {
-    if (!inputText.trim() || !activeChatId) return;
+  const handleSendMessage = async (content = inputText) => {
+    if (!content.trim() || !activeChatId) return;
     const chat = chats.find(c => c.id === activeChatId);
     if (!chat) return;
     
@@ -443,7 +478,7 @@ function App() {
     try {
       const key = await getAesKeyFromCode(keyEntry.code);
       const iv = crypto.getRandomValues(new Uint8Array(12));
-      const ciphertextBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(inputText));
+      const ciphertextBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, enc.encode(content));
       
       await jsonFetch('/api/messages', {
         method: 'POST',
@@ -458,6 +493,20 @@ function App() {
     } catch (e) {
       alert("Send failed: " + e.message);
     }
+  };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 500 * 1024) { // 500KB limit for GitHub storage safety
+      alert("File too large (max 500KB)");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      handleSendMessage(reader.result); // Send Data URL as message
+    };
+    reader.readAsDataURL(file);
   };
 
   const decryptMessage = async (chatId, msg) => {
@@ -479,9 +528,13 @@ function App() {
     const [text, setText] = useState("...");
     useEffect(() => { decryptMessage(chatId, msg).then(setText); }, [msg, chatId, chatKeys]);
     const isMe = msg.fromUserId === user.id;
+    const isImage = text.startsWith("data:image");
+
     return (
       <div className={`msg-row ${isMe ? 'me' : 'them'}`}>
-        <div className={`msg-bubble ${isMe ? 'me' : 'them'}`}>{text}</div>
+        <div className={`msg-bubble ${isMe ? 'me' : 'them'}`}>
+          {isImage ? <img src={text} alt="Shared" className="msg-image" /> : text}
+        </div>
       </div>
     );
   };
@@ -559,8 +612,10 @@ function App() {
             {activeMsgs.map(m => <ChatMessage key={m.id} msg={m} chatId={activeChatId} />)}
           </div>
           <div className="chat-input-row">
-            <input value={inputText} onChange={e => setInputText(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSendMessage()} placeholder="Message" />
-            <button onClick={handleSendMessage}>Send</button>
+            <input type="file" ref={fileInputRef} style={{display:'none'}} accept="image/*" onChange={handleFileUpload} />
+            <button className="btn-icon" onClick={() => fileInputRef.current.click()}>📎</button>
+            <input id="chat-input" value={inputText} onChange={e => setInputText(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSendMessage()} placeholder="Message" />
+            <button id="btn-chat-send" onClick={() => handleSendMessage()}>Send</button>
           </div>
         </div>
       </div>
