@@ -372,13 +372,39 @@ function App() {
     const interval = setInterval(async () => {
       try {
         const res = await jsonFetch('/api/calls/pending');
+        // If we have a pending call and we aren't already in a call flow
         if (res.calls && res.calls.length > 0 && !activeCall) {
           setActiveCall({ ...res.calls[0], isIncoming: true });
         }
       } catch {}
-    }, 3000);
+    }, 2000); // Poll every 2 seconds for calls
     return () => clearInterval(interval);
   }, [user, activeCall]);
+
+  // Polling for Messages (Active Chat) & Chat List updates
+  useEffect(() => {
+    if (!user) return;
+    
+    const pollMessages = async () => {
+      try {
+        // We fetch all chats/messages to keep the list and active conversation updated
+        const res = await jsonFetch('/api/chats');
+        // Only update if we have data
+        if (res.chats) {
+          // Check if data actually changed to avoid unnecessary re-renders if possible, 
+          // but for simplicity in this setup, we just update state.
+          // React's diffing will handle the DOM updates efficiently.
+          setChats(res.chats);
+          setMessages(res.messagesByChat || {});
+        }
+      } catch (e) { console.error(e); }
+    };
+
+    // Poll immediately on load/chat change, then every 2 seconds
+    pollMessages();
+    const interval = setInterval(pollMessages, 2000);
+    return () => clearInterval(interval);
+  }, [user]); // Run when user is logged in
 
   // Admin Shortcut
   useEffect(() => {
