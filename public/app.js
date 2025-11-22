@@ -801,22 +801,36 @@ function openSettingsModal() {
 }
 
 // ---------- Chat detail management UI ----------
-function addChatManagementButtons(chat) {
-  // remove existing controls if any
-  const existing = document.getElementById("chat-manage-row");
-  if (existing) existing.remove();
 
-  const row = document.createElement("div");
-  row.id = "chat-manage-row";
-  row.style.display = "flex";
-  row.style.gap = "8px";
-  row.style.marginLeft = "8px";
-  row.style.alignItems = "center";
+// Consolidated Chat Settings Modal (Replaces the cluttered button row)
+function openChatSettingsModal(chat) {
+  const { overlay, dialog } = createModalOverlay();
+  
+  const header = document.createElement("div");
+  header.className = "modal-header";
+  const title = document.createElement("div");
+  title.className = "modal-title";
+  title.textContent = "Chat Settings: " + chat.name;
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "call-end-btn";
+  closeBtn.textContent = "✕";
+  closeBtn.addEventListener("click", () => document.body.removeChild(overlay));
+  header.appendChild(title);
+  header.appendChild(closeBtn);
 
-  const renameBtn = document.createElement("button");
-  renameBtn.className = "btn-pill";
-  renameBtn.textContent = "Rename";
-  renameBtn.addEventListener("click", async () => {
+  const body = document.createElement("div");
+  body.style.display = "flex";
+  body.style.flexDirection = "column";
+  body.style.gap = "10px";
+  body.style.padding = "10px 0";
+
+  // 1. Rename
+  const btnRename = document.createElement("button");
+  btnRename.className = "btn-pill";
+  btnRename.textContent = "Rename Chat";
+  btnRename.style.textAlign = "left";
+  btnRename.addEventListener("click", async () => {
+    document.body.removeChild(overlay);
     const newName = await showPrompt("Rename chat", "New chat name:", { placeholder: chat.name });
     if (!newName) return;
     try {
@@ -835,10 +849,28 @@ function addChatManagementButtons(chat) {
     }
   });
 
-  const clearBtn = document.createElement("button");
-  clearBtn.className = "btn-pill";
-  clearBtn.textContent = "Clear messages";
-  clearBtn.addEventListener("click", async () => {
+  // 2. Import/View Key
+  const btnKey = document.createElement("button");
+  btnKey.className = "btn-pill";
+  const hasKey = !!(chatKeyCache[chat.id] && chatKeyCache[chat.id].code);
+  btnKey.textContent = hasKey ? "View Chat Key" : "Import Chat Key (Locked)";
+  btnKey.style.textAlign = "left";
+  btnKey.addEventListener("click", async () => {
+    document.body.removeChild(overlay);
+    if (hasKey) {
+      showCopyableKeyModal("Current Chat Key", chatKeyCache[chat.id].code);
+    } else {
+      await importKeyForChat(chat);
+    }
+  });
+
+  // 3. Clear Messages
+  const btnClear = document.createElement("button");
+  btnClear.className = "btn-pill";
+  btnClear.textContent = "Clear History";
+  btnClear.style.textAlign = "left";
+  btnClear.addEventListener("click", async () => {
+    document.body.removeChild(overlay);
     const ok = await showConfirm("Clear messages", "Clear all messages in this chat? This cannot be undone.");
     if (!ok) return;
     try {
@@ -852,53 +884,13 @@ function addChatManagementButtons(chat) {
     }
   });
 
-  const deleteBtn = document.createElement("button");
-  deleteBtn.className = "btn-pill";
-  deleteBtn.textContent = "Delete chat";
-  deleteBtn.style.background = "#ffecec";
-  deleteBtn.addEventListener("click", async () => {
-    const ok = await showConfirm("Delete chat", "Delete this chat and all messages? This cannot be undone.");
-    if (!ok) return;
-    try {
-      await jsonFetch(`/api/chats/${encodeURIComponent(chat.id)}`, { method: "DELETE" });
-      chats = chats.filter((c) => c.id !== chat.id);
-      delete messagesByChat[chat.id];
-      activeChatId = null;
-      renderChatList();
-      renderChatDetail(null);
-      await showAlert("Deleted", "Chat deleted.");
-    } catch (e) {
-      await showAlert("Error", e.message || "Delete failed.");
-    }
-  });
-
-  const setKeyBtn = document.createElement("button");
-  setKeyBtn.className = "btn-pill";
-  setKeyBtn.textContent = "Import key";
-  setKeyBtn.addEventListener("click", async () => {
-    const code = await showPrompt("Import chat key", "Paste the chat key code for this conversation (the letters + emojis).", { textarea: true, rows: 2 });
-    if (!code) return;
-    try {
-      const keyBytes = await deriveKeyBytesFromCode(code);
-      const hashHex = bytesToHex(keyBytes);
-      await jsonFetch(`/api/chats/${encodeURIComponent(chat.id)}/set-key`, {
-        method: "POST",
-        body: JSON.stringify({ encryptionKeyHash: hashHex })
-      });
-      if (!chatKeyCache[chat.id]) chatKeyCache[chat.id] = {};
-      chatKeyCache[chat.id].code = code;
-      saveChatKeyCache();
-      await showAlert("Success", "Chat key set. Reloading messages...");
-      await loadChats();
-    } catch (e) {
-      await showAlert("Error", "Failed to import key: " + (e.message || e));
-    }
-  });
-
-  const rotateBtn = document.createElement("button");
-  rotateBtn.className = "btn-pill";
-  rotateBtn.textContent = "Rotate key (new chat)";
-  rotateBtn.addEventListener("click", async () => {
+  // 4. Rotate Key
+  const btnRotate = document.createElement("button");
+  btnRotate.className = "btn-pill";
+  btnRotate.textContent = "Rotate Key (Re-create Chat)";
+  btnRotate.style.textAlign = "left";
+  btnRotate.addEventListener("click", async () => {
+    document.body.removeChild(overlay);
     const ok = await showConfirm("Rotate key", "Rotate this chat key: a new chat will be created and the old chat deleted. Continue?");
     if (!ok) return;
     const code = generateChatKeyCode();
@@ -925,23 +917,53 @@ function addChatManagementButtons(chat) {
     }
   });
 
-  row.appendChild(renameBtn);
-  row.appendChild(clearBtn);
-  row.appendChild(deleteBtn);
-  row.appendChild(setKeyBtn);
-  row.appendChild(rotateBtn);
+  // 5. Delete Chat
+  const btnDelete = document.createElement("button");
+  btnDelete.className = "btn-pill";
+  btnDelete.textContent = "Delete Chat";
+  btnDelete.style.background = "#ffecec";
+  btnDelete.style.color = "#d00";
+  btnDelete.style.textAlign = "left";
+  btnDelete.addEventListener("click", async () => {
+    document.body.removeChild(overlay);
+    const ok = await showConfirm("Delete chat", "Delete this chat and all messages? This cannot be undone.");
+    if (!ok) return;
+    try {
+      await jsonFetch(`/api/chats/${encodeURIComponent(chat.id)}`, { method: "DELETE" });
+      chats = chats.filter((c) => c.id !== chat.id);
+      delete messagesByChat[chat.id];
+      activeChatId = null;
+      renderChatList();
+      renderChatDetail(null);
+      await showAlert("Deleted", "Chat deleted.");
+    } catch (e) {
+      await showAlert("Error", e.message || "Delete failed.");
+    }
+  });
 
-  chatDetailPresence.appendChild(document.createTextNode(" "));
-  chatDetailPresence.appendChild(row);
+  body.appendChild(btnRename);
+  body.appendChild(btnKey);
+  body.appendChild(btnClear);
+  body.appendChild(btnRotate);
+  body.appendChild(document.createElement("hr"));
+  body.appendChild(btnDelete);
+
+  dialog.appendChild(header);
+  dialog.appendChild(body);
+  document.body.appendChild(overlay);
 }
 
-// Modify renderChatDetail to add management buttons when a chat is selected
+// Modify renderChatDetail to use the new single "Manage" button
 async function renderChatDetail(chat) {
   // Cleanup previous header-manage/delete button if present
-  const maybeBtn = document.getElementById("btn-chat-delete");
-  if (maybeBtn) maybeBtn.remove();
-  const existingManage = document.getElementById("chat-manage-row");
+  const existingManage = document.getElementById("btn-chat-manage");
   if (existingManage) existingManage.remove();
+  
+  // Remove old rows if they exist
+  const oldRow = document.getElementById("chat-manage-row");
+  if (oldRow) oldRow.remove();
+  const oldDel = document.getElementById("btn-chat-delete");
+  if (oldDel) oldDel.remove();
 
   if (!chat) {
     chatDetailName.textContent = "Select a chat";
@@ -958,44 +980,14 @@ async function renderChatDetail(chat) {
 
   chatDetailName.textContent = chat.name;
 
-  // Add delete button to header (right side)
-  try {
-    const headerEl = chatDetailName.parentElement; // .chat-detail-header
-    let delBtn = document.getElementById("btn-chat-delete");
-    if (!delBtn) {
-      delBtn = document.createElement("button");
-      delBtn.id = "btn-chat-delete";
-      delBtn.className = "btn-pill";
-      delBtn.style.marginLeft = "8px";
-      delBtn.textContent = "Delete chat";
-      delBtn.addEventListener("click", async () => {
-        const ok = await showConfirm(
-          "Delete chat",
-          "Delete this chat and all messages? This cannot be undone."
-        );
-        if (!ok) return;
-        try {
-          await jsonFetch(`/api/chats/${encodeURIComponent(chat.id)}`, { method: "DELETE" });
-          // update local state
-          chats = chats.filter((c) => c.id !== chat.id);
-          delete messagesByChat[chat.id];
-          activeChatId = null;
-          renderChatList();
-          renderChatDetail(null);
-          await showAlert("Deleted", "Chat deleted.");
-        } catch (e) {
-          await showAlert("Error", e.message || "Delete failed.");
-        }
-      });
-    }
-    // attach if not already attached
-    if (delBtn.parentElement !== headerEl) {
-      if (delBtn.parentElement) delBtn.parentElement.removeChild(delBtn);
-      headerEl.appendChild(delBtn);
-    }
-  } catch (e) {
-    console.warn("Failed to add delete button:", e);
-  }
+  // Add "Manage" button to header
+  const manageBtn = document.createElement("button");
+  manageBtn.id = "btn-chat-manage";
+  manageBtn.className = "btn-pill";
+  manageBtn.textContent = "Manage";
+  manageBtn.style.marginLeft = "auto";
+  manageBtn.addEventListener("click", () => openChatSettingsModal(chat));
+  chatDetailName.parentElement.appendChild(manageBtn);
 
   const others = (chat.participantIds || []).filter(
     (id) => currentUser && id !== currentUser.id
@@ -1011,21 +1003,11 @@ async function renderChatDetail(chat) {
 
   chatCallTarget.textContent = `Your Talky ID: ${currentUser ? currentUser.id : "?"}`;
 
-  // Show key status
+  // Show key status text (no inline button, use Manage menu)
   const hasKey = !!(chatKeyCache[chat.id] && chatKeyCache[chat.id].code);
   if (!hasKey) {
-    chatDetailPresence.textContent += " • 🔒 Locked (no chat key)";
-    const btn = document.createElement("button");
-    btn.className = "btn-pill";
-    btn.textContent = "Import chat key";
-    btn.style.marginLeft = "8px";
-    btn.addEventListener("click", () => importKeyForChat(chat));
-    chatDetailPresence.appendChild(document.createTextNode(" "));
-    chatDetailPresence.appendChild(btn);
+    chatDetailPresence.textContent += " • 🔒 Locked (no key)";
   }
-
-  // attach management buttons
-  addChatManagementButtons(chat);
 
   renderMessages(chat);
 }
@@ -1475,7 +1457,7 @@ refreshMe();
   } catch {}
 })();
 
-// ---------- Missing Polling Functions ----------
+// ---------- Missing Polling Functions (Fixes "startPendingCallPolling is not defined") ----------
 function startPendingCallPolling() {
   if (pendingCallPollTimer) clearInterval(pendingCallPollTimer);
   pollPendingCalls(); // run immediately
