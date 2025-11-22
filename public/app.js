@@ -1,5 +1,84 @@
 // app.js - Talky front-end (GitHub-backed, encrypted chats, call signaling)
 
+// Inject Video Call Styles
+const videoStyles = document.createElement('style');
+videoStyles.textContent = `
+  .video-call-wrapper {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-height: 400px;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    border-radius: 12px;
+  }
+  #remote-video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  #local-video {
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    width: 160px;
+    height: 120px;
+    background: #333;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-radius: 12px;
+    object-fit: cover;
+    cursor: grab;
+    z-index: 10;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    transition: box-shadow 0.2s;
+  }
+  #local-video:active {
+    cursor: grabbing;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  }
+  .call-overlay-controls {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 16px;
+    z-index: 20;
+    background: rgba(0,0,0,0.6);
+    padding: 12px 24px;
+    border-radius: 999px;
+    backdrop-filter: blur(4px);
+  }
+  .call-overlay-controls button {
+    background: transparent;
+    border: none;
+    color: white;
+    font-size: 20px;
+    cursor: pointer;
+    padding: 8px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    transition: background 0.2s;
+  }
+  .call-overlay-controls button:hover {
+    background: rgba(255,255,255,0.2);
+  }
+  .call-overlay-controls button.hangup {
+    background: #ff4d4f;
+  }
+  .call-overlay-controls button.hangup:hover {
+    background: #ff7875;
+  }
+`;
+document.head.appendChild(videoStyles);
+
 // ---------- Element refs ----------
 const authScreen = document.getElementById("auth-screen");
 const mainScreen = document.getElementById("main-screen");
@@ -228,7 +307,7 @@ async function refreshMe() {
     if (currentUser) {
       headerUsername.textContent = currentUser.username;
       headerUserId.textContent = `ID: ${currentUser.id}`;
-
+      
       // remove any stray overlays before showing main UI
       try { closeCallOverlay(); } catch {}
       document.querySelectorAll(".modal-overlay").forEach((el) => el.remove());
@@ -249,7 +328,7 @@ async function refreshMe() {
     }
   } catch (err) {
     console.error("Failed to refresh /api/me:", err);
-
+    
     // Ensure overlays don't block the auth screen on error
     try { closeCallOverlay(); } catch {}
     document.querySelectorAll(".modal-overlay").forEach((el) => el.remove());
@@ -483,64 +562,142 @@ async function renderMessages(chat) {
   chatMessages.scrollTop = chatMessages.scrollHeight;
 }
 
-// ---------- Settings (ringtone, volume) ----------
+// ---------- Settings State ----------
 const SETTINGS_KEY = "talky_settings";
 let talkySettings = { ringtone: "default", volume: 0.6 };
+try {
+  const raw = localStorage.getItem(SETTINGS_KEY);
+  if (raw) talkySettings = JSON.parse(raw);
+} catch {}
 
-function loadSettings() {
-  try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) talkySettings = JSON.parse(raw);
-  } catch {}
-}
-function saveSettings() {
-  localStorage.setItem(SETTINGS_KEY, JSON.stringify(talkySettings));
-}
-loadSettings();
+// ---------- WebRTC State ----------
+let localStream = null;
+let peerConnection = null;
+let signalingInterval = null;
+let currentCallId = null;
+const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 
-// Simple WebAudio tone player for dialing/ringtone
+// ---------- Audio Helpers ----------
 let audioCtx = null;
 let toneNode = null;
 let toneGain = null;
+
 function ensureAudio() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
 }
 
-function playDialTone() {
+function playTone(freq, type = "sine") {
   stopTone();
   ensureAudio();
   toneNode = audioCtx.createOscillator();
   toneGain = audioCtx.createGain();
-  toneNode.type = "sine";
-  toneNode.frequency.value = 425; // simple dialing-ish tone
+  toneNode.type = type;
+  toneNode.frequency.value = freq;
   toneGain.gain.value = talkySettings.volume;
   toneNode.connect(toneGain);
   toneGain.connect(audioCtx.destination);
   toneNode.start();
 }
-function playRingtone() {
-  stopTone();
-  ensureAudio();
-  // use alternating beep pattern using oscillator and scheduling
-  toneNode = audioCtx.createOscillator();
-  toneGain = audioCtx.createGain();
-  toneNode.type = "sine";
-  toneNode.frequency.value = 880;
-  toneGain.gain.value = talkySettings.volume * 0.8;
-  toneNode.connect(toneGain);
-  toneGain.connect(audioCtx.destination);
-  toneNode.start();
-}
+
+function playDialTone() { playTone(425); }
+function playRingtone() { playTone(880, "triangle"); } // Distinct ringtone
 function stopTone() {
+  if (toneNode) { try { toneNode.stop(); } catch{} toneNode.disconnect(); toneNode = null; }
+  if (toneGain) { toneGain.disconnect(); toneGain = null; }
+}
+
+// ---------- WebRTC Logic ----------
+async function startWebRTC(isCaller, callId, type) {
+  currentCallId = callId;
+  peerConnection = new RTCPeerConnection(rtcConfig);
+
+  peerConnection.onicecandidate = (event) => {
+    if (event.candidate) sendSignal(callId, "candidate", event.candidate);
+  };
+
+  peerConnection.ontrack = (event) => {
+    const remoteVid = document.getElementById("remote-video");
+    if (remoteVid) remoteVid.srcObject = event.streams[0];
+  };
+
   try {
-    if (toneNode) {
-      toneNode.stop();
-      toneNode.disconnect();
+    const constraints = { audio: true, video: type === "video" };
+    localStream = await navigator.mediaDevices.getUserMedia(constraints);
+    
+    const localVid = document.getElementById("local-video");
+    if (localVid) {
+      localVid.srcObject = localStream;
+      localVid.muted = true;
     }
-    if (toneGain) toneGain.disconnect();
-  } catch {}
-  toneNode = null;
-  toneGain = null;
+
+    localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+    if (isCaller) {
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+      await sendSignal(callId, "offer", offer);
+    }
+    
+    startSignalingPolling(callId);
+  } catch (err) {
+    console.error("Media Error:", err);
+    alert("Could not access camera/microphone. Ensure you are on HTTPS or localhost.");
+  }
+}
+
+async function sendSignal(callId, type, data) {
+  await jsonFetch(`/api/calls/${encodeURIComponent(callId)}/signal`, {
+    method: "POST",
+    body: JSON.stringify({ type, data })
+  });
+}
+
+function startSignalingPolling(callId) {
+  if (signalingInterval) clearInterval(signalingInterval);
+  let lastSignalTs = Date.now();
+  
+  signalingInterval = setInterval(async () => {
+    try {
+      const res = await jsonFetch(`/api/calls/${encodeURIComponent(callId)}/signal?since=${lastSignalTs}`);
+      if (res.signals && res.signals.length) {
+        for (const sig of res.signals) {
+          lastSignalTs = Math.max(lastSignalTs, sig.ts);
+          await handleSignal(sig);
+        }
+      }
+    } catch (e) { console.error(e); }
+  }, 1000);
+}
+
+async function handleSignal(sig) {
+  if (!peerConnection) return;
+  if (sig.type === "offer") {
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(sig.data));
+    const answer = await peerConnection.createAnswer();
+    await peerConnection.setLocalDescription(answer);
+    await sendSignal(currentCallId, "answer", answer);
+  } else if (sig.type === "answer") {
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(sig.data));
+  } else if (sig.type === "candidate") {
+    await peerConnection.addIceCandidate(new RTCIceCandidate(sig.data));
+  }
+}
+
+function stopWebRTC() {
+  if (localStream) {
+    localStream.getTracks().forEach(t => t.stop());
+    localStream = null;
+  }
+  if (peerConnection) {
+    peerConnection.close();
+    peerConnection = null;
+  }
+  if (signalingInterval) {
+    clearInterval(signalingInterval);
+    signalingInterval = null;
+  }
+  currentCallId = null;
 }
 
 // Request notification permission on first use
@@ -778,7 +935,7 @@ function addChatManagementButtons(chat) {
   chatDetailPresence.appendChild(row);
 }
 
-// Modify renderChatDetail to include a visible "Delete chat" button in the header
+// Modify renderChatDetail to add management buttons when a chat is selected
 async function renderChatDetail(chat) {
   // Cleanup previous header-manage/delete button if present
   const maybeBtn = document.getElementById("btn-chat-delete");
@@ -799,7 +956,6 @@ async function renderChatDetail(chat) {
     return;
   }
 
-  // Title
   chatDetailName.textContent = chat.name;
 
   // Add delete button to header (right side)
@@ -841,7 +997,6 @@ async function renderChatDetail(chat) {
     console.warn("Failed to add delete button:", e);
   }
 
-  // Presence text
   const others = (chat.participantIds || []).filter(
     (id) => currentUser && id !== currentUser.id
   );
@@ -854,22 +1009,1116 @@ async function renderChatDetail(chat) {
         : "Direct chat.";
   }
 
-  // Show Talky ID / call target
   chatCallTarget.textContent = `Your Talky ID: ${currentUser ? currentUser.id : "?"}`;
 
-  // Add management buttons row (rename, clear, import, rotate, delete handled here)
-  addChatManagementButtons(chat);
-
-  // Show key status (add a brief note if locked)
+  // Show key status
   const hasKey = !!(chatKeyCache[chat.id] && chatKeyCache[chat.id].code);
   if (!hasKey) {
-    // Avoid duplicating text by appending to presence rather than replacing it
-    const note = document.createElement("span");
-    note.style.marginLeft = "8px";
-    note.textContent = "• 🔒 Locked (no chat key)";
-    chatDetailPresence.appendChild(note);
+    chatDetailPresence.textContent += " • 🔒 Locked (no chat key)";
+    const btn = document.createElement("button");
+    btn.className = "btn-pill";
+    btn.textContent = "Import chat key";
+    btn.style.marginLeft = "8px";
+    btn.addEventListener("click", () => importKeyForChat(chat));
+    chatDetailPresence.appendChild(document.createTextNode(" "));
+    chatDetailPresence.appendChild(btn);
   }
 
-  // Render messages (will show decrypt status per message)
-  await renderMessages(chat);
+  // attach management buttons
+  addChatManagementButtons(chat);
+
+  renderMessages(chat);
+}
+
+// ---------- Calls (signaling only) ----------
+function openCallOverlayLayout(callType, title, bodyContent) {
+  callDialogTitle.textContent =
+    callType === "video" ? "Video Call" : "Audio Call";
+  callDialogBody.innerHTML = "";
+  callDialogBody.appendChild(bodyContent);
+  callOverlay.classList.remove("hidden");
+}
+
+function closeCallOverlay() {
+  callOverlay.classList.add("hidden");
+}
+
+callDialogClose.addEventListener("click", closeCallOverlay);
+callOverlay.addEventListener("click", (e) => {
+  if (e.target === callOverlay) {
+    closeCallOverlay();
+  }
+});
+
+function buildCallScreen(name, type, statusText, extraButtons = []) {
+  const screen = document.createElement("div");
+  screen.className = "call-screen";
+
+  if (type === "video" && (statusText.includes("Connected") || statusText.includes("In Call"))) {
+    const vidContainer = document.createElement("div");
+    vidContainer.className = "video-call-wrapper";
+    
+    const remoteVideo = document.createElement("video");
+    remoteVideo.id = "remote-video";
+    remoteVideo.autoplay = true;
+    remoteVideo.playsInline = true;
+    
+    const localVideo = document.createElement("video");
+    localVideo.id = "local-video";
+    localVideo.autoplay = true;
+    localVideo.playsInline = true;
+    localVideo.muted = true;
+
+    // Draggable logic for local video
+    let isDragging = false;
+    let startX, startY, initialLeft, initialTop;
+
+    localVideo.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      const rect = localVideo.getBoundingClientRect();
+      const parentRect = vidContainer.getBoundingClientRect();
+      initialLeft = rect.left - parentRect.left;
+      initialTop = rect.top - parentRect.top;
+      localVideo.style.cursor = 'grabbing';
+      localVideo.style.bottom = 'auto';
+      localVideo.style.right = 'auto';
+      localVideo.style.left = `${initialLeft}px`;
+      localVideo.style.top = `${initialTop}px`;
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      localVideo.style.left = `${initialLeft + dx}px`;
+      localVideo.style.top = `${initialTop + dy}px`;
+    });
+
+    document.addEventListener('mouseup', () => {
+      isDragging = false;
+      if(localVideo) localVideo.style.cursor = 'grab';
+    });
+
+    // Overlay controls
+    const controls = document.createElement("div");
+    controls.className = "call-overlay-controls";
+    
+    const hangupBtn = document.createElement("button");
+    hangupBtn.className = "hangup";
+    hangupBtn.innerHTML = "✕";
+    hangupBtn.title = "End Call";
+    hangupBtn.addEventListener("click", () => {
+      stopTone();
+      stopWebRTC();
+      closeCallOverlay();
+    });
+    controls.appendChild(hangupBtn);
+    vidContainer.appendChild(controls);
+
+    screen.appendChild(vidContainer);
+  } else {
+    const avatar = document.createElement("div");
+    avatar.className = "call-avatar";
+    avatar.textContent = name.slice(0, 2).toUpperCase();
+    screen.appendChild(avatar);
+
+    const nameEl = document.createElement("div");
+    nameEl.className = "call-name";
+    nameEl.textContent = name;
+    screen.appendChild(nameEl);
+
+    const statusEl = document.createElement("div");
+    statusEl.className = "call-status";
+    statusEl.textContent = statusText;
+    screen.appendChild(statusEl);
+
+    const buttonsRow = document.createElement("div");
+    buttonsRow.className = "call-buttons";
+
+    const endBtn = document.createElement("button");
+    endBtn.className = "call-end-btn";
+    endBtn.textContent = "✕";
+    endBtn.addEventListener("click", () => {
+      stopTone();
+      stopWebRTC();
+      closeCallOverlay();
+    });
+
+    buttonsRow.appendChild(endBtn);
+    extraButtons.forEach((b) => buttonsRow.appendChild(b));
+    screen.appendChild(buttonsRow);
+  }
+
+  return screen;
+}
+
+function openCallStartDialog(type) {
+  if (!currentUser) {
+    alert("Log in first.");
+    return;
+  }
+
+  const container = document.createElement("div");
+  container.style.display = "flex";
+  container.style.flexDirection = "column";
+  container.style.gap = "10px";
+
+  const label1 = document.createElement("div");
+  label1.textContent = "Start a call with:";
+  label1.style.fontSize = "13px";
+
+  const select = document.createElement("select");
+  select.style.width = "100%";
+  select.style.padding = "6px";
+  select.style.borderRadius = "10px";
+  select.style.border = "1px solid #e5e5ea";
+  const optionNone = document.createElement("option");
+  optionNone.value = "";
+  optionNone.textContent = "— Pick from your chats —";
+  select.appendChild(optionNone);
+
+  chats.forEach((chat) => {
+    const others = (chat.participantIds || []).filter(
+      (id) => currentUser && id !== currentUser.id
+    );
+    if (!others.length) return;
+    const opt = document.createElement("option");
+    opt.value = chat.id;
+    opt.textContent = `${chat.name} (${chat.type === "group" ? "group" : "dm"})`;
+    select.appendChild(opt);
+  });
+
+  const orDiv = document.createElement("div");
+  orDiv.style.fontSize = "11px";
+  orDiv.style.color = "#999";
+  orDiv.textContent = "or call by username:";
+
+  const usernameInput = document.createElement("input");
+  usernameInput.type = "text";
+  usernameInput.placeholder = "Username (exact)";
+  usernameInput.style.width = "100%";
+  usernameInput.style.padding = "8px";
+  usernameInput.style.borderRadius = "10px";
+  usernameInput.style.border = "1px solid #e5e5ea";
+
+  const startBtn = document.createElement("button");
+  startBtn.className = "btn btn-primary";
+  startBtn.textContent = type === "video" ? "Start video call" : "Start audio call";
+  startBtn.style.marginTop = "4px";
+
+  // replace the click handler body to play dialing tone and stop when accepted/failed
+  startBtn.addEventListener("click", async () => {
+    let toUsername = usernameInput.value.trim();
+    let chatId = null;
+
+    if (!toUsername && select.value) {
+      const chat = chats.find((c) => c.id === select.value);
+      if (!chat) {
+        await showAlert("Error", "Chat not found.");
+        return;
+      }
+      const others = (chat.participantIds || []).filter(
+        (id) => currentUser && id !== currentUser.id
+      );
+      if (!others.length) {
+        await showAlert("Error", "This chat has no other users.");
+        return;
+      }
+      const picked = await showPrompt(
+        "Pick username",
+        "This chat may include multiple users. Enter the username you want to call from this chat:"
+      );
+      if (!picked) return;
+      toUsername = picked;
+      chatId = chat.id;
+    } else if (!toUsername && !select.value) {
+      alert("Select a chat or type a username.");
+      return;
+    }
+
+    try {
+      playDialTone();
+      const res = await jsonFetch("/api/calls", {
+        method: "POST",
+        body: JSON.stringify({ toUsername, type, chatId })
+      });
+      const call = res.call;
+      
+      const screen = buildCallScreen(toUsername, type, "Calling...");
+      openCallOverlayLayout(type, "Calling", screen);
+
+      // Poll for acceptance
+      const pollAccept = setInterval(async () => {
+        try {
+          const cRes = await jsonFetch(`/api/calls/${call.id}`);
+          if (cRes.call && cRes.call.status === "connected") {
+            clearInterval(pollAccept);
+            stopTone();
+            const inCallScreen = buildCallScreen(toUsername, type, "Connected");
+            openCallOverlayLayout(type, "In Call", inCallScreen);
+            startWebRTC(true, call.id, type); // Caller starts WebRTC
+          } else if (cRes.call && cRes.call.status === "ended") {
+            clearInterval(pollAccept);
+            stopTone();
+            closeCallOverlay();
+            alert("Call declined or ended.");
+          }
+        } catch {}
+      }, 1000);
+
+    } catch (err) {
+      stopTone();
+      alert(err.message || "Failed to start call.");
+    }
+  });
+
+  container.appendChild(label1);
+  container.appendChild(select);
+  container.appendChild(orDiv);
+  container.appendChild(usernameInput);
+  container.appendChild(startBtn);
+
+  openCallOverlayLayout(type, type === "video" ? "Video Call" : "Audio Call", container);
+}
+
+// Poll for incoming calls (play ringtone + show notification)
+async function pollPendingCalls() {
+  if (!currentUser) return;
+  try {
+    const res = await jsonFetch("/api/calls/pending");
+    const calls = res.calls || [];
+    if (!calls.length) return;
+    const call = calls[0];
+
+    // Avoid re-ringing for same call
+    if (currentCallId === call.id) return;
+
+    playRingtone();
+
+    const acceptBtn = document.createElement("button");
+    acceptBtn.className = "btn btn-primary";
+    acceptBtn.textContent = "Accept";
+    acceptBtn.addEventListener("click", async () => {
+      stopTone();
+      await jsonFetch(`/api/calls/${encodeURIComponent(call.id)}/accept`, { method: "POST" });
+      const inCallScreen = buildCallScreen(`User ${call.fromUserId}`, call.type, "Connected");
+      openCallOverlayLayout(call.type, "In Call", inCallScreen);
+      startWebRTC(false, call.id, call.type); // Callee starts WebRTC
+    });
+
+    const declineBtn = document.createElement("button");
+    declineBtn.className = "btn-pill";
+    declineBtn.textContent = "Decline";
+    declineBtn.addEventListener("click", async () => {
+      stopTone();
+      await jsonFetch(`/api/calls/${encodeURIComponent(call.id)}/decline`, { method: "POST" });
+      closeCallOverlay();
+    });
+
+    const screen = buildCallScreen(`User ${call.fromUserId}`, call.type, "Incoming Call...", [acceptBtn, declineBtn]);
+    // Remove the default end button from buildCallScreen for incoming view if desired, or keep it
+    openCallOverlayLayout(call.type, "Incoming Call", screen);
+
+  } catch (err) { console.error(err); }
+}
+
+// ---------- integrate settings & tone stop on overlay close ----------
+callDialogClose.addEventListener("click", () => {
+  stopTone();
+  closeCallOverlay();
+});
+callOverlay.addEventListener("click", (e) => {
+  if (e.target === callOverlay) {
+    stopTone();
+    closeCallOverlay();
+  }
+});
+
+// ---------- Admin secret menu ----------
+document.addEventListener("keydown", async (e) => {
+  const onLoginScreen =
+    !authScreen.classList.contains("hidden") &&
+    mainScreen.classList.contains("hidden");
+
+  if (
+    onLoginScreen &&
+    e.key.toLowerCase() === "z" &&
+    e.ctrlKey &&
+    e.altKey &&
+    e.shiftKey
+  ) {
+    e.preventDefault();
+    await openAdminMenu();
+  }
+});
+
+async function openAdminMenu() {
+  if (isAdminOpen) return;
+
+  const pass = prompt("Enter admin password:");
+  if (!pass) return;
+
+  try {
+    await jsonFetch("/api/admin/login", {
+      method: "POST",
+      body: JSON.stringify({ password: pass })
+    });
+  } catch (err) {
+    alert(err.message || "Admin login failed.");
+    return;
+  }
+
+  isAdminOpen = true;
+  adminOverlay.classList.remove("hidden");
+  await loadAdminUsers();
+}
+
+adminClose.addEventListener("click", () => {
+  adminOverlay.classList.add("hidden");
+  isAdminOpen = false;
+});
+
+adminOverlay.addEventListener("click", (e) => {
+  if (e.target === adminOverlay) {
+    adminOverlay.classList.add("hidden");
+    isAdminOpen = false;
+  }
+});
+
+async function loadAdminUsers() {
+  adminBody.innerHTML = "Loading users…";
+  try {
+    const res = await jsonFetch("/api/admin/users");
+    const users = res.users || [];
+    if (!users.length) {
+      adminBody.innerHTML =
+        "<div style='font-size:12px;color:#999'>No users yet.</div>";
+      return;
+    }
+    const container = document.createElement("div");
+    users.forEach((u) => {
+      const row = document.createElement("div");
+      row.className = "admin-row";
+
+      const main = document.createElement("div");
+      main.className = "admin-user-main";
+
+      const name = document.createElement("div");
+      name.className = "admin-user-name";
+      name.textContent = `${u.username} (${u.id})`;
+
+      const meta = document.createElement("div");
+      meta.className = "admin-user-meta";
+      meta.textContent = `Joined: ${new Date(u.createdAt).toLocaleString()}`;
+
+      main.appendChild(name);
+      main.appendChild(meta);
+
+      const right = document.createElement("div");
+      right.style.display = "flex";
+      right.style.alignItems = "center";
+      right.style.gap = "6px";
+
+      if (u.isAdmin) {
+        const badge = document.createElement("span");
+        badge.className = "admin-badge-admin";
+        badge.textContent = "Admin";
+        right.appendChild(badge);
+      }
+
+      const delBtn = document.createElement("button");
+      delBtn.className = "admin-delete-btn";
+      delBtn.textContent = "Delete";
+      delBtn.addEventListener("click", async () => {
+        if (
+          !confirm(
+            `Delete user ${u.username}? This removes their chats, messages, and calls.`
+          )
+        ) {
+          return;
+        }
+        try {
+          await jsonFetch(`/api/admin/users/${encodeURIComponent(u.id)}`, {
+            method: "DELETE"
+          });
+          await loadAdminUsers();
+        } catch (err) {
+          alert(err.message || "Failed to delete user.");
+        }
+      });
+
+      right.appendChild(delBtn);
+
+      row.appendChild(main);
+      row.appendChild(right);
+      container.appendChild(row);
+    });
+    adminBody.innerHTML = "";
+    adminBody.appendChild(container);
+  } catch (err) {
+    console.error("Failed to load admin users:", err);
+    adminBody.innerHTML =
+      "<div style='font-size:12px;color:#b00'>Failed to load users.</div>";
+  }
+}
+
+// ---------- Init ----------
+switchAuthTab("login");
+refreshMe();
+
+// Ensure we request notification permission on startup for better UX
+(async () => {
+  try {
+    await ensureNotifications();
+  } catch {}
+})();
+
+// ---------- In-page modal helpers (replace prompt/confirm/alert) ----------
+function createModalOverlay() {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  const dialog = document.createElement("div");
+  dialog.className = "modal-dialog";
+  overlay.appendChild(dialog);
+  return { overlay, dialog };
+}
+
+function showAlert(title, message) {
+  return new Promise((resolve) => {
+    const { overlay, dialog } = createModalOverlay();
+    const header = document.createElement("div");
+    header.className = "modal-header";
+    const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Notice";
+    const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
+    closeX.addEventListener("click", () => { document.body.removeChild(overlay); resolve(); });
+    header.appendChild(t); header.appendChild(closeX);
+
+    const body = document.createElement("div");
+    body.style.marginTop = "8px";
+    body.textContent = message || "";
+
+    const actions = document.createElement("div"); actions.className = "modal-actions";
+    const ok = document.createElement("button"); ok.className = "btn btn-primary"; ok.textContent = "OK";
+    ok.addEventListener("click", () => { document.body.removeChild(overlay); resolve(); });
+
+    actions.appendChild(ok);
+    dialog.appendChild(header);
+    dialog.appendChild(body);
+    dialog.appendChild(actions);
+    document.body.appendChild(overlay);
+  });
+}
+
+function showConfirm(title, message) {
+  return new Promise((resolve) => {
+    const { overlay, dialog } = createModalOverlay();
+    const header = document.createElement("div");
+    header.className = "modal-header";
+    const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Confirm";
+    const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
+    closeX.addEventListener("click", () => { document.body.removeChild(overlay); resolve(false); });
+    header.appendChild(t); header.appendChild(closeX);
+
+    const body = document.createElement("div");
+    body.style.marginTop = "8px";
+    body.textContent = message || "";
+
+    const actions = document.createElement("div"); actions.className = "modal-actions";
+    const no = document.createElement("button"); no.className = "btn-pill"; no.textContent = "No";
+    const yes = document.createElement("button"); yes.className = "btn btn-primary"; yes.textContent = "Yes";
+    no.addEventListener("click", () => { document.body.removeChild(overlay); resolve(false); });
+    yes.addEventListener("click", () => { document.body.removeChild(overlay); resolve(true); });
+
+    actions.appendChild(no);
+    actions.appendChild(yes);
+    dialog.appendChild(header);
+    dialog.appendChild(body);
+    dialog.appendChild(actions);
+    document.body.appendChild(overlay);
+  });
+}
+
+function showPrompt(title, label, opts = {}) {
+  // opts: { placeholder, textarea, rows }
+  return new Promise((resolve) => {
+    const { overlay, dialog } = createModalOverlay();
+    const header = document.createElement("div");
+    header.className = "modal-header";
+    const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Input";
+    const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
+    closeX.addEventListener("click", () => { document.body.removeChild(overlay); resolve(null); });
+    header.appendChild(t); header.appendChild(closeX);
+
+    const body = document.createElement("div");
+    body.className = "modal-row";
+    const lbl = document.createElement("div"); lbl.textContent = label || "";
+    let input;
+    if (opts.textarea) {
+      input = document.createElement("textarea");
+      input.rows = opts.rows || 3;
+      input.style.resize = "vertical";
+    } else {
+      input = document.createElement("input");
+      input.type = "text";
+    }
+    input.placeholder = opts.placeholder || "";
+    body.appendChild(lbl);
+    body.appendChild(input);
+
+    const actions = document.createElement("div"); actions.className = "modal-actions";
+    const cancel = document.createElement("button"); cancel.className = "btn-pill"; cancel.textContent = "Cancel";
+    const ok = document.createElement("button"); ok.className = "btn btn-primary"; ok.textContent = "OK";
+
+    cancel.addEventListener("click", () => { document.body.removeChild(overlay); resolve(null); });
+    ok.addEventListener("click", () => { document.body.removeChild(overlay); resolve(input.value.trim()); });
+
+    actions.appendChild(cancel); actions.appendChild(ok);
+    dialog.appendChild(header); dialog.appendChild(body); dialog.appendChild(actions);
+    document.body.appendChild(overlay);
+
+    // focus
+    setTimeout(() => input.focus(), 50);
+  });
+}
+
+// Helper to show a modal with a copyable key (used after creating/rotating)
+function showCopyableKeyModal(title, key) {
+  const { overlay, dialog } = createModalOverlay();
+  const header = document.createElement("div");
+  header.className = "modal-header";
+  const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Chat key";
+  const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
+  closeX.addEventListener("click", () => { document.body.removeChild(overlay); });
+  header.appendChild(t); header.appendChild(closeX);
+
+  const body = document.createElement("div");
+  body.className = "modal-row";
+  const lbl = document.createElement("div"); lbl.textContent = "Share this key with participants (they need it to decrypt):";
+  const copyRow = document.createElement("div"); copyRow.className = "copy-code-row";
+  const txt = document.createElement("textarea"); txt.readOnly = true; txt.rows = 2; txt.value = key; txt.style.flex = "1";
+  const btn = document.createElement("button"); btn.className = "btn-copy"; btn.textContent = "Copy";
+  btn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(txt.value);
+      btn.textContent = "Copied";
+      setTimeout(() => (btn.textContent = "Copy"), 1500);
+    } catch {
+      txt.select();
+      document.execCommand("copy");
+      btn.textContent = "Copied";
+      setTimeout(() => (btn.textContent = "Copy"), 1500);
+    }
+  });
+  copyRow.appendChild(txt); copyRow.appendChild(btn);
+  body.appendChild(lbl); body.appendChild(copyRow);
+
+  const actions = document.createElement("div"); actions.className = "modal-actions";
+  const ok = document.createElement("button"); ok.className = "btn btn-primary"; ok.textContent = "Done";
+  ok.addEventListener("click", () => { document.body.removeChild(overlay); });
+  actions.appendChild(ok);
+
+  dialog.appendChild(header); dialog.appendChild(body); dialog.appendChild(actions);
+  document.body.appendChild(overlay);
+}
+
+// ---------- Replace browser popups with modals in flows ----------
+
+// Replace importKeyForChat to use in-page prompt
+async function importKeyForChat(chat) {
+  const code = await showPrompt("Import chat key", "Paste the chat key code for this conversation (the letters + emojis).", { textarea: true, rows: 2 });
+  if (!code) return;
+  try {
+    const keyBytes = await deriveKeyBytesFromCode(code);
+    const hashHex = bytesToHex(keyBytes);
+    const expected = chat.encryption && chat.encryption.keyHash;
+    if (!expected) {
+      await showAlert("Import failed", "This chat does not have encryption metadata.");
+      return;
+    }
+    if (hashHex !== expected) {
+      await showAlert("Import failed", "That key does not match this chat.");
+      return;
+    }
+    if (!chatKeyCache[chat.id]) chatKeyCache[chat.id] = {};
+    chatKeyCache[chat.id].code = code;
+    saveChatKeyCache();
+    await showAlert("Success", "Chat key saved. Reloading messages...");
+    await loadChats();
+    const c = chats.find((x) => x.id === chat.id);
+    if (c) renderChatDetail(c);
+  } catch (e) {
+    await showAlert("Error", "Failed to import key: " + (e.message || e));
+  }
+}
+
+// Replace new-chat modal's use of prompt in call start flow (where used earlier)
+async function openCallStartDialog(type) {
+  if (!currentUser) {
+    alert("Log in first.");
+    return;
+  }
+
+  const container = document.createElement("div");
+  container.style.display = "flex";
+  container.style.flexDirection = "column";
+  container.style.gap = "10px";
+
+  const label1 = document.createElement("div");
+  label1.textContent = "Start a call with:";
+  label1.style.fontSize = "13px";
+
+  const select = document.createElement("select");
+  select.style.width = "100%";
+  select.style.padding = "6px";
+  select.style.borderRadius = "10px";
+  select.style.border = "1px solid #e5e5ea";
+  const optionNone = document.createElement("option");
+  optionNone.value = "";
+  optionNone.textContent = "— Pick from your chats —";
+  select.appendChild(optionNone);
+
+  chats.forEach((chat) => {
+    const others = (chat.participantIds || []).filter(
+      (id) => currentUser && id !== currentUser.id
+    );
+    if (!others.length) return;
+    const opt = document.createElement("option");
+    opt.value = chat.id;
+    opt.textContent = `${chat.name} (${chat.type === "group" ? "group" : "dm"})`;
+    select.appendChild(opt);
+  });
+
+  const orDiv = document.createElement("div");
+  orDiv.style.fontSize = "11px";
+  orDiv.style.color = "#999";
+  orDiv.textContent = "or call by username:";
+
+  const usernameInput = document.createElement("input");
+  usernameInput.type = "text";
+  usernameInput.placeholder = "Username (exact)";
+  usernameInput.style.width = "100%";
+  usernameInput.style.padding = "8px";
+  usernameInput.style.borderRadius = "10px";
+  usernameInput.style.border = "1px solid #e5e5ea";
+
+  const startBtn = document.createElement("button");
+  startBtn.className = "btn btn-primary";
+  startBtn.textContent = type === "video" ? "Start video call" : "Start audio call";
+  startBtn.style.marginTop = "4px";
+
+  // replace the click handler body to play dialing tone and stop when accepted/failed
+  startBtn.addEventListener("click", async () => {
+    let toUsername = usernameInput.value.trim();
+    let chatId = null;
+
+    if (!toUsername && select.value) {
+      const chat = chats.find((c) => c.id === select.value);
+      if (!chat) {
+        await showAlert("Error", "Chat not found.");
+        return;
+      }
+      const others = (chat.participantIds || []).filter(
+        (id) => currentUser && id !== currentUser.id
+      );
+      if (!others.length) {
+        await showAlert("Error", "This chat has no other users.");
+        return;
+      }
+      const picked = await showPrompt(
+        "Pick username",
+        "This chat may include multiple users. Enter the username you want to call from this chat:"
+      );
+      if (!picked) return;
+      toUsername = picked;
+      chatId = chat.id;
+    } else if (!toUsername && !select.value) {
+      alert("Select a chat or type a username.");
+      return;
+    }
+
+    try {
+      playDialTone();
+      const res = await jsonFetch("/api/calls", {
+        method: "POST",
+        body: JSON.stringify({ toUsername, type, chatId })
+      });
+      const call = res.call;
+      
+      const screen = buildCallScreen(toUsername, type, "Calling...");
+      openCallOverlayLayout(type, "Calling", screen);
+
+      // Poll for acceptance
+      const pollAccept = setInterval(async () => {
+        try {
+          const cRes = await jsonFetch(`/api/calls/${call.id}`);
+          if (cRes.call && cRes.call.status === "connected") {
+            clearInterval(pollAccept);
+            stopTone();
+            const inCallScreen = buildCallScreen(toUsername, type, "Connected");
+            openCallOverlayLayout(type, "In Call", inCallScreen);
+            startWebRTC(true, call.id, type); // Caller starts WebRTC
+          } else if (cRes.call && cRes.call.status === "ended") {
+            clearInterval(pollAccept);
+            stopTone();
+            closeCallOverlay();
+            alert("Call declined or ended.");
+          }
+        } catch {}
+      }, 1000);
+
+    } catch (err) {
+      stopTone();
+      alert(err.message || "Failed to start call.");
+    }
+  });
+
+  container.appendChild(label1);
+  container.appendChild(select);
+  container.appendChild(orDiv);
+  container.appendChild(usernameInput);
+  container.appendChild(startBtn);
+
+  openCallOverlayLayout(type, type === "video" ? "Video Call" : "Audio Call", container);
+}
+
+// Poll for incoming calls (play ringtone + show notification)
+async function pollPendingCalls() {
+  if (!currentUser) return;
+  try {
+    const res = await jsonFetch("/api/calls/pending");
+    const calls = res.calls || [];
+    if (!calls.length) return;
+    const call = calls[0];
+
+    // Avoid re-ringing for same call
+    if (currentCallId === call.id) return;
+
+    playRingtone();
+
+    const acceptBtn = document.createElement("button");
+    acceptBtn.className = "btn btn-primary";
+    acceptBtn.textContent = "Accept";
+    acceptBtn.addEventListener("click", async () => {
+      stopTone();
+      await jsonFetch(`/api/calls/${encodeURIComponent(call.id)}/accept`, { method: "POST" });
+      const inCallScreen = buildCallScreen(`User ${call.fromUserId}`, call.type, "Connected");
+      openCallOverlayLayout(call.type, "In Call", inCallScreen);
+      startWebRTC(false, call.id, call.type); // Callee starts WebRTC
+    });
+
+    const declineBtn = document.createElement("button");
+    declineBtn.className = "btn-pill";
+    declineBtn.textContent = "Decline";
+    declineBtn.addEventListener("click", async () => {
+      stopTone();
+      await jsonFetch(`/api/calls/${encodeURIComponent(call.id)}/decline`, { method: "POST" });
+      closeCallOverlay();
+    });
+
+    const screen = buildCallScreen(`User ${call.fromUserId}`, call.type, "Incoming Call...", [acceptBtn, declineBtn]);
+    // Remove the default end button from buildCallScreen for incoming view if desired, or keep it
+    openCallOverlayLayout(call.type, "Incoming Call", screen);
+
+  } catch (err) { console.error(err); }
+}
+
+// ---------- integrate settings & tone stop on overlay close ----------
+callDialogClose.addEventListener("click", () => {
+  stopTone();
+  closeCallOverlay();
+});
+callOverlay.addEventListener("click", (e) => {
+  if (e.target === callOverlay) {
+    stopTone();
+    closeCallOverlay();
+  }
+});
+
+// ---------- Admin secret menu ----------
+document.addEventListener("keydown", async (e) => {
+  const onLoginScreen =
+    !authScreen.classList.contains("hidden") &&
+    mainScreen.classList.contains("hidden");
+
+  if (
+    onLoginScreen &&
+    e.key.toLowerCase() === "z" &&
+    e.ctrlKey &&
+    e.altKey &&
+    e.shiftKey
+  ) {
+    e.preventDefault();
+    await openAdminMenu();
+  }
+});
+
+async function openAdminMenu() {
+  if (isAdminOpen) return;
+
+  const pass = prompt("Enter admin password:");
+  if (!pass) return;
+
+  try {
+    await jsonFetch("/api/admin/login", {
+      method: "POST",
+      body: JSON.stringify({ password: pass })
+    });
+  } catch (err) {
+    alert(err.message || "Admin login failed.");
+    return;
+  }
+
+  isAdminOpen = true;
+  adminOverlay.classList.remove("hidden");
+  await loadAdminUsers();
+}
+
+adminClose.addEventListener("click", () => {
+  adminOverlay.classList.add("hidden");
+  isAdminOpen = false;
+});
+
+adminOverlay.addEventListener("click", (e) => {
+  if (e.target === adminOverlay) {
+    adminOverlay.classList.add("hidden");
+    isAdminOpen = false;
+  }
+});
+
+async function loadAdminUsers() {
+  adminBody.innerHTML = "Loading users…";
+  try {
+    const res = await jsonFetch("/api/admin/users");
+    const users = res.users || [];
+    if (!users.length) {
+      adminBody.innerHTML =
+        "<div style='font-size:12px;color:#999'>No users yet.</div>";
+      return;
+    }
+    const container = document.createElement("div");
+    users.forEach((u) => {
+      const row = document.createElement("div");
+      row.className = "admin-row";
+
+      const main = document.createElement("div");
+      main.className = "admin-user-main";
+
+      const name = document.createElement("div");
+      name.className = "admin-user-name";
+      name.textContent = `${u.username} (${u.id})`;
+
+      const meta = document.createElement("div");
+      meta.className = "admin-user-meta";
+      meta.textContent = `Joined: ${new Date(u.createdAt).toLocaleString()}`;
+
+      main.appendChild(name);
+      main.appendChild(meta);
+
+      const right = document.createElement("div");
+      right.style.display = "flex";
+      right.style.alignItems = "center";
+      right.style.gap = "6px";
+
+      if (u.isAdmin) {
+        const badge = document.createElement("span");
+        badge.className = "admin-badge-admin";
+        badge.textContent = "Admin";
+        right.appendChild(badge);
+      }
+
+      const delBtn = document.createElement("button");
+      delBtn.className = "admin-delete-btn";
+      delBtn.textContent = "Delete";
+      delBtn.addEventListener("click", async () => {
+        if (
+          !confirm(
+            `Delete user ${u.username}? This removes their chats, messages, and calls.`
+          )
+        ) {
+          return;
+        }
+        try {
+          await jsonFetch(`/api/admin/users/${encodeURIComponent(u.id)}`, {
+            method: "DELETE"
+          });
+          await loadAdminUsers();
+        } catch (err) {
+          alert(err.message || "Failed to delete user.");
+        }
+      });
+
+      right.appendChild(delBtn);
+
+      row.appendChild(main);
+      row.appendChild(right);
+      container.appendChild(row);
+    });
+    adminBody.innerHTML = "";
+    adminBody.appendChild(container);
+  } catch (err) {
+    console.error("Failed to load admin users:", err);
+    adminBody.innerHTML =
+      "<div style='font-size:12px;color:#b00'>Failed to load users.</div>";
+  }
+}
+
+// ---------- Init ----------
+switchAuthTab("login");
+refreshMe();
+
+// Ensure we request notification permission on startup for better UX
+(async () => {
+  try {
+    await ensureNotifications();
+  } catch {}
+})();
+
+// ---------- In-page modal helpers (replace prompt/confirm/alert) ----------
+function createModalOverlay() {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  const dialog = document.createElement("div");
+  dialog.className = "modal-dialog";
+  overlay.appendChild(dialog);
+  return { overlay, dialog };
+}
+
+function showAlert(title, message) {
+  return new Promise((resolve) => {
+    const { overlay, dialog } = createModalOverlay();
+    const header = document.createElement("div");
+    header.className = "modal-header";
+    const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Notice";
+    const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
+    closeX.addEventListener("click", () => { document.body.removeChild(overlay); resolve(); });
+    header.appendChild(t); header.appendChild(closeX);
+
+    const body = document.createElement("div");
+    body.style.marginTop = "8px";
+    body.textContent = message || "";
+
+    const actions = document.createElement("div"); actions.className = "modal-actions";
+    const ok = document.createElement("button"); ok.className = "btn btn-primary"; ok.textContent = "OK";
+    ok.addEventListener("click", () => { document.body.removeChild(overlay); resolve(); });
+
+    actions.appendChild(ok);
+    dialog.appendChild(header);
+    dialog.appendChild(body);
+    dialog.appendChild(actions);
+    document.body.appendChild(overlay);
+  });
+}
+
+function showConfirm(title, message) {
+  return new Promise((resolve) => {
+    const { overlay, dialog } = createModalOverlay();
+    const header = document.createElement("div");
+    header.className = "modal-header";
+    const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Confirm";
+    const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
+    closeX.addEventListener("click", () => { document.body.removeChild(overlay); resolve(false); });
+    header.appendChild(t); header.appendChild(closeX);
+
+    const body = document.createElement("div");
+    body.style.marginTop = "8px";
+    body.textContent = message || "";
+
+    const actions = document.createElement("div"); actions.className = "modal-actions";
+    const no = document.createElement("button"); no.className = "btn-pill"; no.textContent = "No";
+    const yes = document.createElement("button"); yes.className = "btn btn-primary"; yes.textContent = "Yes";
+    no.addEventListener("click", () => { document.body.removeChild(overlay); resolve(false); });
+    yes.addEventListener("click", () => { document.body.removeChild(overlay); resolve(true); });
+
+    actions.appendChild(no);
+    actions.appendChild(yes);
+    dialog.appendChild(header);
+    dialog.appendChild(body);
+    dialog.appendChild(actions);
+    document.body.appendChild(overlay);
+  });
+}
+
+function showPrompt(title, label, opts = {}) {
+  // opts: { placeholder, textarea, rows }
+  return new Promise((resolve) => {
+    const { overlay, dialog } = createModalOverlay();
+    const header = document.createElement("div");
+    header.className = "modal-header";
+    const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Input";
+    const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
+    closeX.addEventListener("click", () => { document.body.removeChild(overlay); resolve(null); });
+    header.appendChild(t); header.appendChild(closeX);
+
+    const body = document.createElement("div");
+    body.className = "modal-row";
+    const lbl = document.createElement("div"); lbl.textContent = label || "";
+    let input;
+    if (opts.textarea) {
+      input = document.createElement("textarea");
+      input.rows = opts.rows || 3;
+      input.style.resize = "vertical";
+    } else {
+      input = document.createElement("input");
+      input.type = "text";
+    }
+    input.placeholder = opts.placeholder || "";
+    body.appendChild(lbl);
+    body.appendChild(input);
+
+    const actions = document.createElement("div"); actions.className = "modal-actions";
+    const cancel = document.createElement("button"); cancel.className = "btn-pill"; cancel.textContent = "Cancel";
+    const ok = document.createElement("button"); ok.className = "btn btn-primary"; ok.textContent = "OK";
+
+    cancel.addEventListener("click", () => { document.body.removeChild(overlay); resolve(null); });
+    ok.addEventListener("click", () => { document.body.removeChild(overlay); resolve(input.value.trim()); });
+
+    actions.appendChild(cancel); actions.appendChild(ok);
+    dialog.appendChild(header); dialog.appendChild(body); dialog.appendChild(actions);
+    document.body.appendChild(overlay);
+
+    // focus
+    setTimeout(() => input.focus(), 50);
+  });
+}
+
+// Helper to show a modal with a copyable key (used after creating/rotating)
+function showCopyableKeyModal(title, key) {
+  const { overlay, dialog } = createModalOverlay();
+  const header = document.createElement("div");
+  header.className = "modal-header";
+  const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Chat key";
+  const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
+  closeX.addEventListener("click", () => { document.body.removeChild(overlay); });
+  header.appendChild(t); header.appendChild(closeX);
+
+  const body = document.createElement("div");
+  body.className = "modal-row";
+  const lbl = document.createElement("div"); lbl.textContent = "Share this key with participants (they need it to decrypt):";
+  const copyRow = document.createElement("div"); copyRow.className = "copy-code-row";
+  const txt = document.createElement("textarea"); txt.readOnly = true; txt.rows = 2; txt.value = key; txt.style.flex = "1";
+  const btn = document.createElement("button"); btn.className = "btn-copy"; btn.textContent = "Copy";
+  btn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(txt.value);
+      btn.textContent = "Copied";
+      setTimeout(() => (btn.textContent = "Copy"), 1500);
+    } catch {
+      txt.select();
+      document.execCommand("copy");
+      btn.textContent = "Copied";
+      setTimeout(() => (btn.textContent = "Copy"), 1500);
+    }
+  });
+  copyRow.appendChild(txt); copyRow.appendChild(btn);
+  body.appendChild(lbl); body.appendChild(copyRow);
+
+  const actions = document.createElement("div"); actions.className = "modal-actions";
+  const ok = document.createElement("button"); ok.className = "btn btn-primary"; ok.textContent = "Done";
+  ok.addEventListener("click", () => { document.body.removeChild(overlay); });
+  actions.appendChild(ok);
+
+  dialog.appendChild(header); dialog.appendChild(body); dialog.appendChild(actions);
+  document.body.appendChild(overlay);
 }

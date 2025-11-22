@@ -544,6 +544,51 @@ app.post("/api/admin/pause", requireAdmin, async (req, res) => {
   res.json({ globalPaused: db.globalPaused });
 });
 
+// Add signaling endpoint for WebRTC (In-memory only to avoid GitHub rate limits)
+app.post("/api/calls/:id/signal", requireAuth, async (req, res) => {
+  const callId = req.params.id;
+  const { type, data } = req.body || {};
+  const db = await loadDB();
+  const call = db.calls.find((c) => c.id === callId);
+  
+  if (!call) return res.status(404).json({ error: "Call not found" });
+  
+  // Initialize signals array if missing
+  if (!call.signals) call.signals = [];
+  
+  // Store signal in memory
+  call.signals.push({ 
+    type, 
+    data, 
+    fromUserId: req.session.userId, 
+    ts: Date.now() 
+  });
+  
+  // Note: We do NOT await saveDB(db) here to ensure speed and avoid rate limits
+  res.json({ ok: true });
+});
+
+app.get("/api/calls/:id/signal", requireAuth, async (req, res) => {
+  const callId = req.params.id;
+  const since = parseInt(req.query.since || "0");
+  const db = await loadDB();
+  const call = db.calls.find((c) => c.id === callId);
+  
+  if (!call) return res.status(404).json({ error: "Call not found" });
+  
+  const signals = (call.signals || []).filter(s => s.ts > since && s.fromUserId !== req.session.userId);
+  res.json({ signals });
+});
+
+// Endpoint to check call status (for caller to know when accepted)
+app.get("/api/calls/:id", requireAuth, async (req, res) => {
+  const callId = req.params.id;
+  const db = await loadDB();
+  const call = db.calls.find((c) => c.id === callId);
+  if (!call) return res.status(404).json({ error: "Call not found" });
+  res.json({ call });
+});
+
 app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
