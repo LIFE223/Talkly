@@ -646,7 +646,7 @@ function addChatManagementButtons(chat) {
   renameBtn.className = "btn-pill";
   renameBtn.textContent = "Rename";
   renameBtn.addEventListener("click", async () => {
-    const newName = prompt("New chat name:", chat.name);
+    const newName = await showPrompt("Rename chat", "New chat name:", { placeholder: chat.name });
     if (!newName) return;
     try {
       const res = await jsonFetch(`/api/chats/${encodeURIComponent(chat.id)}/rename`, {
@@ -658,8 +658,9 @@ function addChatManagementButtons(chat) {
       local.name = updated.name;
       renderChatList();
       renderChatDetail(updated);
+      await showAlert("Renamed", "Chat renamed.");
     } catch (e) {
-      alert(e.message || "Rename failed.");
+      await showAlert("Error", e.message || "Rename failed.");
     }
   });
 
@@ -667,16 +668,16 @@ function addChatManagementButtons(chat) {
   clearBtn.className = "btn-pill";
   clearBtn.textContent = "Clear messages";
   clearBtn.addEventListener("click", async () => {
-    if (!confirm("Clear all messages in this chat? This cannot be undone.")) return;
+    const ok = await showConfirm("Clear messages", "Clear all messages in this chat? This cannot be undone.");
+    if (!ok) return;
     try {
-      await jsonFetch(`/api/chats/${encodeURIComponent(chat.id)}/clear`, {
-        method: "POST"
-      });
+      await jsonFetch(`/api/chats/${encodeURIComponent(chat.id)}/clear`, { method: "POST" });
       messagesByChat[chat.id] = [];
       renderMessages(chat);
       renderChatList();
+      await showAlert("Cleared", "Messages cleared.");
     } catch (e) {
-      alert(e.message || "Clear failed.");
+      await showAlert("Error", e.message || "Clear failed.");
     }
   });
 
@@ -685,17 +686,18 @@ function addChatManagementButtons(chat) {
   deleteBtn.textContent = "Delete chat";
   deleteBtn.style.background = "#ffecec";
   deleteBtn.addEventListener("click", async () => {
-    if (!confirm("Delete this chat and all messages? This cannot be undone.")) return;
+    const ok = await showConfirm("Delete chat", "Delete this chat and all messages? This cannot be undone.");
+    if (!ok) return;
     try {
       await jsonFetch(`/api/chats/${encodeURIComponent(chat.id)}`, { method: "DELETE" });
-      // remove locally
       chats = chats.filter((c) => c.id !== chat.id);
       delete messagesByChat[chat.id];
       activeChatId = null;
       renderChatList();
       renderChatDetail(null);
+      await showAlert("Deleted", "Chat deleted.");
     } catch (e) {
-      alert(e.message || "Delete failed.");
+      await showAlert("Error", e.message || "Delete failed.");
     }
   });
 
@@ -703,7 +705,7 @@ function addChatManagementButtons(chat) {
   setKeyBtn.className = "btn-pill";
   setKeyBtn.textContent = "Import key";
   setKeyBtn.addEventListener("click", async () => {
-    const code = prompt("Paste chat key code (letters + emojis) to set for this chat:");
+    const code = await showPrompt("Import chat key", "Paste the chat key code for this conversation (the letters + emojis).", { textarea: true, rows: 2 });
     if (!code) return;
     try {
       const keyBytes = await deriveKeyBytesFromCode(code);
@@ -715,10 +717,10 @@ function addChatManagementButtons(chat) {
       if (!chatKeyCache[chat.id]) chatKeyCache[chat.id] = {};
       chatKeyCache[chat.id].code = code;
       saveChatKeyCache();
-      alert("Chat key set. Reloading messages...");
+      await showAlert("Success", "Chat key set. Reloading messages...");
       await loadChats();
     } catch (e) {
-      alert("Failed to import key: " + (e.message || e));
+      await showAlert("Error", "Failed to import key: " + (e.message || e));
     }
   });
 
@@ -726,8 +728,8 @@ function addChatManagementButtons(chat) {
   rotateBtn.className = "btn-pill";
   rotateBtn.textContent = "Rotate key (new chat)";
   rotateBtn.addEventListener("click", async () => {
-    if (!confirm("Rotate this chat key: a new chat will be created and the old chat deleted. Continue?")) return;
-    // generate new code
+    const ok = await showConfirm("Rotate key", "Rotate this chat key: a new chat will be created and the old chat deleted. Continue?");
+    if (!ok) return;
     const code = generateChatKeyCode();
     try {
       const keyBytes = await deriveKeyBytesFromCode(code);
@@ -737,20 +739,18 @@ function addChatManagementButtons(chat) {
         body: JSON.stringify({ encryptionKeyHash: hashHex })
       });
       const newChat = res.chat;
-      // save code locally
       if (!chatKeyCache[newChat.id]) chatKeyCache[newChat.id] = {};
       chatKeyCache[newChat.id].code = code;
       saveChatKeyCache();
-      // update local lists
       chats = chats.filter((c) => c.id !== chat.id);
       chats.push(newChat);
       messagesByChat[newChat.id] = [];
       activeChatId = newChat.id;
       renderChatList();
       renderChatDetail(newChat);
-      alert("New chat created. Share this code with participants:\n\n" + code);
+      showCopyableKeyModal("New chat key", code);
     } catch (e) {
-      alert(e.message || "Rotate failed.");
+      await showAlert("Error", e.message || "Rotate failed.");
     }
   });
 
@@ -946,20 +946,22 @@ function openCallStartDialog(type) {
     if (!toUsername && select.value) {
       const chat = chats.find((c) => c.id === select.value);
       if (!chat) {
-        alert("Chat not found.");
+        await showAlert("Error", "Chat not found.");
         return;
       }
       const others = (chat.participantIds || []).filter(
         (id) => currentUser && id !== currentUser.id
       );
       if (!others.length) {
-        alert("This chat has no other users.");
+        await showAlert("Error", "This chat has no other users.");
         return;
       }
-      toUsername = prompt(
-        "This chat may include multiple users.\n\nEnter the username you want to call from this chat:"
+      const picked = await showPrompt(
+        "Pick username",
+        "This chat may include multiple users. Enter the username you want to call from this chat:"
       );
-      if (!toUsername) return;
+      if (!picked) return;
+      toUsername = picked;
       chatId = chat.id;
     } else if (!toUsername && !select.value) {
       alert("Select a chat or type a username.");
@@ -1265,3 +1267,402 @@ refreshMe();
     await ensureNotifications();
   } catch {}
 })();
+
+// ---------- In-page modal helpers (replace prompt/confirm/alert) ----------
+function createModalOverlay() {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  const dialog = document.createElement("div");
+  dialog.className = "modal-dialog";
+  overlay.appendChild(dialog);
+  return { overlay, dialog };
+}
+
+function showAlert(title, message) {
+  return new Promise((resolve) => {
+    const { overlay, dialog } = createModalOverlay();
+    const header = document.createElement("div");
+    header.className = "modal-header";
+    const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Notice";
+    const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
+    closeX.addEventListener("click", () => { document.body.removeChild(overlay); resolve(); });
+    header.appendChild(t); header.appendChild(closeX);
+
+    const body = document.createElement("div");
+    body.style.marginTop = "8px";
+    body.textContent = message || "";
+
+    const actions = document.createElement("div"); actions.className = "modal-actions";
+    const ok = document.createElement("button"); ok.className = "btn btn-primary"; ok.textContent = "OK";
+    ok.addEventListener("click", () => { document.body.removeChild(overlay); resolve(); });
+
+    actions.appendChild(ok);
+    dialog.appendChild(header);
+    dialog.appendChild(body);
+    dialog.appendChild(actions);
+    document.body.appendChild(overlay);
+  });
+}
+
+function showConfirm(title, message) {
+  return new Promise((resolve) => {
+    const { overlay, dialog } = createModalOverlay();
+    const header = document.createElement("div");
+    header.className = "modal-header";
+    const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Confirm";
+    const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
+    closeX.addEventListener("click", () => { document.body.removeChild(overlay); resolve(false); });
+    header.appendChild(t); header.appendChild(closeX);
+
+    const body = document.createElement("div");
+    body.style.marginTop = "8px";
+    body.textContent = message || "";
+
+    const actions = document.createElement("div"); actions.className = "modal-actions";
+    const no = document.createElement("button"); no.className = "btn-pill"; no.textContent = "No";
+    const yes = document.createElement("button"); yes.className = "btn btn-primary"; yes.textContent = "Yes";
+    no.addEventListener("click", () => { document.body.removeChild(overlay); resolve(false); });
+    yes.addEventListener("click", () => { document.body.removeChild(overlay); resolve(true); });
+
+    actions.appendChild(no);
+    actions.appendChild(yes);
+    dialog.appendChild(header);
+    dialog.appendChild(body);
+    dialog.appendChild(actions);
+    document.body.appendChild(overlay);
+  });
+}
+
+function showPrompt(title, label, opts = {}) {
+  // opts: { placeholder, textarea, rows }
+  return new Promise((resolve) => {
+    const { overlay, dialog } = createModalOverlay();
+    const header = document.createElement("div");
+    header.className = "modal-header";
+    const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Input";
+    const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
+    closeX.addEventListener("click", () => { document.body.removeChild(overlay); resolve(null); });
+    header.appendChild(t); header.appendChild(closeX);
+
+    const body = document.createElement("div");
+    body.className = "modal-row";
+    const lbl = document.createElement("div"); lbl.textContent = label || "";
+    let input;
+    if (opts.textarea) {
+      input = document.createElement("textarea");
+      input.rows = opts.rows || 3;
+      input.style.resize = "vertical";
+    } else {
+      input = document.createElement("input");
+      input.type = "text";
+    }
+    input.placeholder = opts.placeholder || "";
+    body.appendChild(lbl);
+    body.appendChild(input);
+
+    const actions = document.createElement("div"); actions.className = "modal-actions";
+    const cancel = document.createElement("button"); cancel.className = "btn-pill"; cancel.textContent = "Cancel";
+    const ok = document.createElement("button"); ok.className = "btn btn-primary"; ok.textContent = "OK";
+
+    cancel.addEventListener("click", () => { document.body.removeChild(overlay); resolve(null); });
+    ok.addEventListener("click", () => { document.body.removeChild(overlay); resolve(input.value.trim()); });
+
+    actions.appendChild(cancel); actions.appendChild(ok);
+    dialog.appendChild(header); dialog.appendChild(body); dialog.appendChild(actions);
+    document.body.appendChild(overlay);
+
+    // focus
+    setTimeout(() => input.focus(), 50);
+  });
+}
+
+// Helper to show a modal with a copyable key (used after creating/rotating)
+function showCopyableKeyModal(title, key) {
+  const { overlay, dialog } = createModalOverlay();
+  const header = document.createElement("div");
+  header.className = "modal-header";
+  const t = document.createElement("div"); t.className = "modal-title"; t.textContent = title || "Chat key";
+  const closeX = document.createElement("button"); closeX.className = "call-end-btn"; closeX.textContent = "✕";
+  closeX.addEventListener("click", () => { document.body.removeChild(overlay); });
+  header.appendChild(t); header.appendChild(closeX);
+
+  const body = document.createElement("div");
+  body.className = "modal-row";
+  const lbl = document.createElement("div"); lbl.textContent = "Share this key with participants (they need it to decrypt):";
+  const copyRow = document.createElement("div"); copyRow.className = "copy-code-row";
+  const txt = document.createElement("textarea"); txt.readOnly = true; txt.rows = 2; txt.value = key; txt.style.flex = "1";
+  const btn = document.createElement("button"); btn.className = "btn-copy"; btn.textContent = "Copy";
+  btn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(txt.value);
+      btn.textContent = "Copied";
+      setTimeout(() => (btn.textContent = "Copy"), 1500);
+    } catch {
+      txt.select();
+      document.execCommand("copy");
+      btn.textContent = "Copied";
+      setTimeout(() => (btn.textContent = "Copy"), 1500);
+    }
+  });
+  copyRow.appendChild(txt); copyRow.appendChild(btn);
+  body.appendChild(lbl); body.appendChild(copyRow);
+
+  const actions = document.createElement("div"); actions.className = "modal-actions";
+  const ok = document.createElement("button"); ok.className = "btn btn-primary"; ok.textContent = "Done";
+  ok.addEventListener("click", () => { document.body.removeChild(overlay); });
+  actions.appendChild(ok);
+
+  dialog.appendChild(header); dialog.appendChild(body); dialog.appendChild(actions);
+  document.body.appendChild(overlay);
+}
+
+// ---------- Replace browser popups with modals in flows ----------
+
+// Replace importKeyForChat to use in-page prompt
+async function importKeyForChat(chat) {
+  const code = await showPrompt("Import chat key", "Paste the chat key code for this conversation (the letters + emojis).", { textarea: true, rows: 2 });
+  if (!code) return;
+  try {
+    const keyBytes = await deriveKeyBytesFromCode(code);
+    const hashHex = bytesToHex(keyBytes);
+    const expected = chat.encryption && chat.encryption.keyHash;
+    if (!expected) {
+      await showAlert("Import failed", "This chat does not have encryption metadata.");
+      return;
+    }
+    if (hashHex !== expected) {
+      await showAlert("Import failed", "That key does not match this chat.");
+      return;
+    }
+    if (!chatKeyCache[chat.id]) chatKeyCache[chat.id] = {};
+    chatKeyCache[chat.id].code = code;
+    saveChatKeyCache();
+    await showAlert("Success", "Chat key saved. Reloading messages...");
+    await loadChats();
+    const c = chats.find((x) => x.id === chat.id);
+    if (c) renderChatDetail(c);
+  } catch (e) {
+    await showAlert("Error", "Failed to import key: " + (e.message || e));
+  }
+}
+
+// Replace new-chat modal's use of prompt in call start flow (where used earlier)
+async function openCallStartDialog(type) {
+  if (!currentUser) {
+    alert("Log in first.");
+    return;
+  }
+
+  const container = document.createElement("div");
+  container.style.display = "flex";
+  container.style.flexDirection = "column";
+  container.style.gap = "10px";
+
+  const label1 = document.createElement("div");
+  label1.textContent = "Start a call with:";
+  label1.style.fontSize = "13px";
+
+  const select = document.createElement("select");
+  select.style.width = "100%";
+  select.style.padding = "6px";
+  select.style.borderRadius = "10px";
+  select.style.border = "1px solid #e5e5ea";
+  const optionNone = document.createElement("option");
+  optionNone.value = "";
+  optionNone.textContent = "— Pick from your chats —";
+  select.appendChild(optionNone);
+
+  chats.forEach((chat) => {
+    const others = (chat.participantIds || []).filter(
+      (id) => currentUser && id !== currentUser.id
+    );
+    if (!others.length) return;
+    const opt = document.createElement("option");
+    opt.value = chat.id;
+    opt.textContent = `${chat.name} (${chat.type === "group" ? "group" : "dm"})`;
+    select.appendChild(opt);
+  });
+
+  const orDiv = document.createElement("div");
+  orDiv.style.fontSize = "11px";
+  orDiv.style.color = "#999";
+  orDiv.textContent = "or call by username:";
+
+  const usernameInput = document.createElement("input");
+  usernameInput.type = "text";
+  usernameInput.placeholder = "Username (exact)";
+  usernameInput.style.width = "100%";
+  usernameInput.style.padding = "8px";
+  usernameInput.style.borderRadius = "10px";
+  usernameInput.style.border = "1px solid #e5e5ea";
+
+  const startBtn = document.createElement("button");
+  startBtn.className = "btn btn-primary";
+  startBtn.textContent = type === "video" ? "Start video call" : "Start audio call";
+  startBtn.style.marginTop = "4px";
+
+  // replace the click handler body to play dialing tone and stop when accepted/failed
+  startBtn.addEventListener("click", async () => {
+    let toUsername = usernameInput.value.trim();
+    let chatId = null;
+
+    if (!toUsername && select.value) {
+      const chat = chats.find((c) => c.id === select.value);
+      if (!chat) {
+        await showAlert("Error", "Chat not found.");
+        return;
+      }
+      const others = (chat.participantIds || []).filter(
+        (id) => currentUser && id !== currentUser.id
+      );
+      if (!others.length) {
+        await showAlert("Error", "This chat has no other users.");
+        return;
+      }
+      const picked = await showPrompt(
+        "Pick username",
+        "This chat may include multiple users. Enter the username you want to call from this chat:"
+      );
+      if (!picked) return;
+      toUsername = picked;
+      chatId = chat.id;
+    } else if (!toUsername && !select.value) {
+      alert("Select a chat or type a username.");
+      return;
+    }
+
+    try {
+      // play dialing tone
+      playDialTone();
+
+      const res = await jsonFetch("/api/calls", {
+        method: "POST",
+        body: JSON.stringify({ toUsername, type, chatId })
+      });
+      const call = res.call;
+      const name = toUsername;
+      const screen = buildCallScreen(
+        name,
+        type,
+        "Calling using Talky IDs…"
+      );
+      openCallOverlayLayout(type, type === "video" ? "Video Call" : "Audio Call", screen);
+
+      // stop dialing tone after a while (or leave it until accept/decline)
+      setTimeout(() => {
+        stopTone();
+      }, 15000);
+    } catch (err) {
+      stopTone();
+      alert(err.message || "Failed to start call.");
+    }
+  });
+
+  container.appendChild(label1);
+  container.appendChild(select);
+  container.appendChild(orDiv);
+  container.appendChild(usernameInput);
+  container.appendChild(startBtn);
+
+  openCallOverlayLayout(type, type === "video" ? "Video Call" : "Audio Call", container);
+}
+
+// Replace rename / delete / clear / set-key / rotate usage of prompt/confirm/alert in chat management:
+  renameBtn.addEventListener("click", async () => {
+    const newName = await showPrompt("Rename chat", "New chat name:", { placeholder: chat.name });
+    if (!newName) return;
+    try {
+      const res = await jsonFetch(`/api/chats/${encodeURIComponent(chat.id)}/rename`, {
+        method: "POST",
+        body: JSON.stringify({ name: newName })
+      });
+      const updated = res.chat;
+      const local = chats.find((c) => c.id === updated.id) || updated;
+      local.name = updated.name;
+      renderChatList();
+      renderChatDetail(updated);
+      await showAlert("Renamed", "Chat renamed.");
+    } catch (e) {
+      await showAlert("Error", e.message || "Rename failed.");
+    }
+  });
+
+  clearBtn.addEventListener("click", async () => {
+    const ok = await showConfirm("Clear messages", "Clear all messages in this chat? This cannot be undone.");
+    if (!ok) return;
+    try {
+      await jsonFetch(`/api/chats/${encodeURIComponent(chat.id)}/clear`, { method: "POST" });
+      messagesByChat[chat.id] = [];
+      renderMessages(chat);
+      renderChatList();
+      await showAlert("Cleared", "Messages cleared.");
+    } catch (e) {
+      await showAlert("Error", e.message || "Clear failed.");
+    }
+  });
+
+  deleteBtn.addEventListener("click", async () => {
+    const ok = await showConfirm("Delete chat", "Delete this chat and all messages? This cannot be undone.");
+    if (!ok) return;
+    try {
+      await jsonFetch(`/api/chats/${encodeURIComponent(chat.id)}`, { method: "DELETE" });
+      chats = chats.filter((c) => c.id !== chat.id);
+      delete messagesByChat[chat.id];
+      activeChatId = null;
+      renderChatList();
+      renderChatDetail(null);
+      await showAlert("Deleted", "Chat deleted.");
+    } catch (e) {
+      await showAlert("Error", e.message || "Delete failed.");
+    }
+  });
+
+  setKeyBtn.addEventListener("click", async () => {
+    const code = await showPrompt("Import chat key", "Paste the chat key code (letters + emojis) to set for this chat:", { textarea: true, rows: 2 });
+    if (!code) return;
+    try {
+      const keyBytes = await deriveKeyBytesFromCode(code);
+      const hashHex = bytesToHex(keyBytes);
+      await jsonFetch(`/api/chats/${encodeURIComponent(chat.id)}/set-key`, {
+        method: "POST",
+        body: JSON.stringify({ encryptionKeyHash: hashHex })
+      });
+      if (!chatKeyCache[chat.id]) chatKeyCache[chat.id] = {};
+      chatKeyCache[chat.id].code = code;
+      saveChatKeyCache();
+      await showAlert("Success", "Chat key set. Reloading messages...");
+      await loadChats();
+    } catch (e) {
+      await showAlert("Error", "Failed to import key: " + (e.message || e));
+    }
+  });
+
+  rotateBtn.addEventListener("click", async () => {
+    const ok = await showConfirm("Rotate key", "Rotate this chat key: a new chat will be created and the old chat deleted. Continue?");
+    if (!ok) return;
+    const code = generateChatKeyCode();
+    try {
+      const keyBytes = await deriveKeyBytesFromCode(code);
+      const hashHex = bytesToHex(keyBytes);
+      const res = await jsonFetch(`/api/chats/${encodeURIComponent(chat.id)}/rotate`, {
+        method: "POST",
+        body: JSON.stringify({ encryptionKeyHash: hashHex })
+      });
+      const newChat = res.chat;
+      if (!chatKeyCache[newChat.id]) chatKeyCache[newChat.id] = {};
+      chatKeyCache[newChat.id].code = code;
+      saveChatKeyCache();
+      chats = chats.filter((c) => c.id !== chat.id);
+      chats.push(newChat);
+      messagesByChat[newChat.id] = [];
+      activeChatId = newChat.id;
+      renderChatList();
+      renderChatDetail(newChat);
+      showCopyableKeyModal("New chat key", code);
+    } catch (e) {
+      await showAlert("Error", e.message || "Rotate failed.");
+    }
+  });
+
+// Ensure usage of showAlert where previously alerts were used in other places
+// e.g. replace simple alert("...") calls in other handlers with await showAlert("Title","message")
