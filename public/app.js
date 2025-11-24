@@ -58,6 +58,7 @@ function AuthScreen({ onLogin }) {
   const [tab, setTab] = useState('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [code, setCode] = useState(''); // Signup code
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -72,10 +73,15 @@ function AuthScreen({ onLogin }) {
 
   const handleSubmit = async () => {
     if (!username || !password) return setError("Fill all fields");
+    if (tab === 'signup' && !code) return setError("Invite code required");
+    
     setError("");
     try {
       const endpoint = tab === 'login' ? '/api/auth/login' : '/api/auth/signup';
-      const res = await jsonFetch(endpoint, { method: 'POST', body: JSON.stringify({ username, password }) });
+      const body = { username, password };
+      if (tab === 'signup') body.code = code;
+
+      const res = await jsonFetch(endpoint, { method: 'POST', body: JSON.stringify(body) });
       localStorage.setItem("talky_remember_username", JSON.stringify({ username, remember: true }));
       onLogin(res.user);
     } catch (e) {
@@ -104,6 +110,12 @@ function AuthScreen({ onLogin }) {
             <div className="field-label">Password</div>
             <input className="field-input" type="password" value={password} onChange={e=>setPassword(e.target.value)} />
           </div>
+          {tab === 'signup' && (
+            <div className="field-row">
+              <div className="field-label">Invite Code</div>
+              <input className="field-input" placeholder="6 chars + emoji" value={code} onChange={e=>setCode(e.target.value)} />
+            </div>
+          )}
           <button className="btn-primary" onClick={handleSubmit}>{tab==='login'?'Log In':'Create Account'}</button>
           <div className="auth-error">{error}</div>
         </div>
@@ -118,10 +130,59 @@ function App() {
   const [messages, setMessages] = useState({});
   const [activeChatId, setActiveChatId] = useState(null);
   const [chatKeys, setChatKeys] = useState({});
-  const [modals, setModals] = useState({ settings: false, newChat: false, admin: false, manageChat: null });
+  const [modals, setModals] = useState({ settings: false, newChat: false, admin: false, manageChat: null, chatParticipants: null });
   const [inputText, setInputText] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [adminCode, setAdminCode] = useState(null); // For admin modal
+  
+  // Theme State
+  const [theme, setTheme] = useState({
+    name: 'light',
+    bg: '#f5f5f7',
+    bgAlt: '#ffffff',
+    textMain: '#111111',
+    primary: '#007aff',
+    bgImage: ''
+  });
+
   const fileInputRef = useRef(null);
+  const chatMessagesRef = useRef(null);
+  const lastPollRef = useRef(Date.now());
+
+  // Load Theme
+  useEffect(() => {
+    const saved = localStorage.getItem("talky_theme");
+    if (saved) {
+      try {
+        const t = JSON.parse(saved);
+        setTheme(t);
+        applyTheme(t);
+      } catch {}
+    }
+  }, []);
+
+  const applyTheme = (t) => {
+    const root = document.documentElement;
+    root.style.setProperty('--bg', t.bg);
+    root.style.setProperty('--bg-alt', t.bgAlt);
+    root.style.setProperty('--text-main', t.textMain);
+    root.style.setProperty('--primary', t.primary);
+    
+    if (t.bgImage) {
+      document.body.style.backgroundImage = `url('${t.bgImage}')`;
+      document.body.style.backgroundSize = 'cover';
+      document.body.style.backgroundPosition = 'center';
+      document.body.style.backgroundAttachment = 'fixed';
+    } else {
+      document.body.style.backgroundImage = 'none';
+    }
+  };
+
+  const updateTheme = (newTheme) => {
+    setTheme(newTheme);
+    applyTheme(newTheme);
+    localStorage.setItem("talky_theme", JSON.stringify(newTheme));
+  };
 
   // Load Keys
   useEffect(() => {
@@ -134,6 +195,13 @@ function App() {
     setChatKeys(newKeys);
     localStorage.setItem("talky_chat_keys", JSON.stringify(newKeys));
   };
+
+  // Request Notification Permission
+  useEffect(() => {
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  }, []);
 
   // Initial Load
   useEffect(() => {
@@ -152,6 +220,28 @@ function App() {
       try {
         const res = await jsonFetch('/api/chats');
         if (res.chats) {
+          // Check for mentions in new messages
+          const now = Date.now();
+          const allMsgs = Object.values(res.messagesByChat || {}).flat();
+          
+          allMsgs.forEach(msg => {
+            // Check if message is new (arrived since last poll check) and not from me
+            if (msg.ts > lastPollRef.current && msg.fromUserId !== user.id) {
+              if (msg.mentions && msg.mentions.includes(user.id)) {
+                const chat = res.chats.find(c => c.id === msg.chatId);
+                const chatName = chat ? chat.name : "Unknown Chat";
+                if (Notification.permission === "granted") {
+                  new Notification(`Mentioned in ${chatName}`, { 
+                    body: "You were mentioned in a message.",
+                  });
+                }
+              }
+            }
+          });
+          
+          // Update last poll time
+          lastPollRef.current = now;
+
           setChats(prev => JSON.stringify(prev) === JSON.stringify(res.chats) ? prev : res.chats);
           setMessages(prev => JSON.stringify(prev) === JSON.stringify(res.messagesByChat) ? prev : res.messagesByChat || {});
         }
@@ -162,15 +252,28 @@ function App() {
     return () => clearInterval(interval);
   }, [user]);
 
+  // Scroll to bottom on chat change or new messages
+  useEffect(() => {
+    if (chatMessagesRef.current) {
+      chatMessagesRef.current.scrollTop = chatMessagesRef.current.scrollHeight;
+    }
+  }, [activeChatId, messages]);
+
   // Admin Shortcut
   useEffect(() => {
     const handler = (e) => {
       if (e.key.toLowerCase() === 'z' && e.ctrlKey && e.altKey && e.shiftKey) {
         e.preventDefault();
         const pass = prompt("Admin Password:");
-        if (pass) jsonFetch('/api/admin/login', { method: 'POST', body: JSON.stringify({ password: pass }) })
-          .then(() => setModals(m => ({ ...m, admin: true })))
-          .catch(e => alert(e.message));
+        if (pass) {
+          jsonFetch('/api/admin/login', { method: 'POST', body: JSON.stringify({ password: pass }) })
+            .then(() => {
+              setModals(m => ({ ...m, admin: true }));
+              // Fetch code immediately
+              jsonFetch('/api/admin/code').then(res => setAdminCode(res.code));
+            })
+            .catch(e => alert(e.message));
+        }
       }
     };
     window.addEventListener('keydown', handler);
@@ -196,6 +299,19 @@ function App() {
       return;
     }
 
+    // Detect mentions
+    const mentionIds = [];
+    if (chat.participants) {
+      const words = content.split(/[\s,.]+/); // Split by space, comma, dot
+      words.forEach(w => {
+        if (w.startsWith('@')) {
+          const targetName = w.slice(1).toLowerCase();
+          const target = chat.participants.find(p => p.username.toLowerCase() === targetName);
+          if (target) mentionIds.push(target.id);
+        }
+      });
+    }
+
     try {
       const key = await getAesKeyFromCode(keyEntry.code);
       const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -206,7 +322,8 @@ function App() {
         body: JSON.stringify({
           chatId: chat.id,
           ciphertext: bufToBase64(ciphertextBuf),
-          iv: bufToBase64(iv.buffer)
+          iv: bufToBase64(iv.buffer),
+          mentions: mentionIds
         })
       });
       setInputText("");
@@ -220,7 +337,7 @@ function App() {
     const file = e.target.files[0];
     if (!file) return;
     
-    // Limit check (GitHub API limit is ~100MB, express limit 50MB)
+    // Limit check (GitHub API limit is ~100MB, express limit 100MB)
     if (file.size > 45 * 1024 * 1024) { 
       alert("File too large (max 45MB)");
       return;
@@ -236,6 +353,26 @@ function App() {
     }
 
     setUploading(true);
+
+    // HYBRID LOGIC: 
+    // Small files (< 500KB) -> Inline Base64 (Old way, instant)
+    // Large files (>= 500KB) -> External Upload (New way, keeps chat fast)
+    if (file.size < 500 * 1024) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        handleSendMessage(reader.result);
+        setUploading(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      };
+      reader.onerror = () => {
+        alert("Failed to read file");
+        setUploading(false);
+      };
+      reader.readAsDataURL(file);
+      return;
+    }
+
+    // Large file logic
     try {
       // 1. Read File
       const arrayBuffer = await file.arrayBuffer();
@@ -420,7 +557,7 @@ function App() {
               <button className="btn-pill" style={{ marginLeft: 'auto' }} onClick={() => setModals({ ...modals, manageChat: activeChat })}>Manage</button>
             )}
           </div>
-          <div id="chat-messages">
+          <div id="chat-messages" ref={chatMessagesRef}>
             {activeMsgs.map(m => <ChatMessage key={m.id} msg={m} chatId={activeChatId} />)}
           </div>
           <div className="chat-input-row">
@@ -467,6 +604,12 @@ function App() {
       {modals.manageChat && (
         <Modal title={`Manage ${modals.manageChat.name}`} onClose={() => setModals({ ...modals, manageChat: null })}>
           <button className="modal-menu-btn" onClick={async () => {
+             try {
+               const res = await jsonFetch(`/api/chats/${modals.manageChat.id}/participants`);
+               setModals({ ...modals, manageChat: null, chatParticipants: res.participants });
+             } catch (e) { alert(e.message); }
+          }}>👥 View Participants</button>
+          <button className="modal-menu-btn" onClick={async () => {
              const newName = prompt("New Name:");
              if (newName) {
                await jsonFetch(`/api/chats/${modals.manageChat.id}/rename`, { method: 'POST', body: JSON.stringify({ name: newName }) });
@@ -492,11 +635,102 @@ function App() {
           }}>🗑️ Delete Chat</button>
         </Modal>
       )}
+
+      {modals.chatParticipants && (
+        <Modal title="Participants" onClose={() => setModals({ ...modals, chatParticipants: null })}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '300px', overflowY: 'auto' }}>
+            {modals.chatParticipants.map(p => (
+              <div key={p.id} style={{ padding: '10px', background: '#f5f5f7', borderRadius: '10px', border: '1px solid #e5e5ea' }}>
+                <div style={{ fontWeight: '600', fontSize: '14px' }}>{p.username}</div>
+                <div style={{ fontSize: '11px', color: '#666', fontFamily: 'monospace', marginTop: '2px' }}>ID: {p.id}</div>
+              </div>
+            ))}
+          </div>
+          <div className="modal-actions">
+            <button className="btn-primary" onClick={() => setModals({ ...modals, chatParticipants: null })}>Close</button>
+          </div>
+        </Modal>
+      )}
       
       {modals.settings && (
         <Modal title="Settings" onClose={() => setModals({ ...modals, settings: false })}>
-           <div className="modal-row"><div>Volume</div><input type="range" min="0" max="1" step="0.1" /></div>
-           <div className="modal-actions"><button className="btn-primary" onClick={() => setModals({ ...modals, settings: false })}>Save</button></div>
+           <div className="settings-section">
+             <h3>🎨 Appearance</h3>
+             <div className="theme-grid">
+               <button className="btn-pill" onClick={() => updateTheme({ name: 'light', bg: '#f5f5f7', bgAlt: '#ffffff', textMain: '#111111', primary: '#007aff', bgImage: '' })}>Light</button>
+               <button className="btn-pill" onClick={() => updateTheme({ name: 'dark', bg: '#1c1c1e', bgAlt: '#2c2c2e', textMain: '#ffffff', primary: '#0a84ff', bgImage: '' })}>Dark</button>
+               <button className="btn-pill" onClick={() => updateTheme({ name: 'midnight', bg: '#000000', bgAlt: '#111111', textMain: '#e5e5ea', primary: '#007aff', bgImage: '' })}>Midnight</button>
+               <button className="btn-pill" onClick={() => updateTheme({ name: 'forest', bg: '#1a2f1a', bgAlt: '#243d24', textMain: '#e0ffe0', primary: '#4cd964', bgImage: '' })}>Forest</button>
+               <button className="btn-pill" onClick={() => updateTheme({ name: 'sunset', bg: '#2b1b1b', bgAlt: '#3d2424', textMain: '#ffe0e0', primary: '#ff9500', bgImage: '' })}>Sunset</button>
+             </div>
+             
+             <div className="modal-row" style={{marginTop: '10px'}}>
+               <div>Custom Background URL</div>
+               <input placeholder="https://..." value={theme.bgImage} onChange={e => updateTheme({ ...theme, name: 'custom', bgImage: e.target.value })} />
+             </div>
+             <div className="modal-row">
+               <div>Background Color</div>
+               <input type="color" value={theme.bg} onChange={e => updateTheme({ ...theme, name: 'custom', bg: e.target.value })} />
+             </div>
+             <div className="modal-row">
+               <div>Card Color</div>
+               <input type="color" value={theme.bgAlt} onChange={e => updateTheme({ ...theme, name: 'custom', bgAlt: e.target.value })} />
+             </div>
+             <div className="modal-row">
+               <div>Text Color</div>
+               <input type="color" value={theme.textMain} onChange={e => updateTheme({ ...theme, name: 'custom', textMain: e.target.value })} />
+             </div>
+           </div>
+
+           <div className="settings-section" style={{marginTop: '20px', borderTop: '1px solid var(--border-subtle)', paddingTop: '10px'}}>
+             <h3>👤 Account</h3>
+             <div className="modal-row">
+               <div>Change Username</div>
+               <div style={{display:'flex', gap:'4px'}}>
+                 <input id="new-username" placeholder={user.username} />
+                 <button className="btn-primary" onClick={async () => {
+                   const val = document.getElementById('new-username').value;
+                   try {
+                     const res = await jsonFetch('/api/me/username', { method: 'POST', body: JSON.stringify({ newUsername: val }) });
+                     setUser(u => ({ ...u, username: res.user.username }));
+                     alert("Username updated");
+                   } catch(e) { alert(e.message); }
+                 }}>Save</button>
+               </div>
+             </div>
+             <div className="modal-row">
+               <div>Change Password</div>
+               <div style={{display:'flex', gap:'4px'}}>
+                 <input id="new-password" type="password" placeholder="New Password" />
+                 <button className="btn-primary" onClick={async () => {
+                   const val = document.getElementById('new-password').value;
+                   try {
+                     await jsonFetch('/api/me/password', { method: 'POST', body: JSON.stringify({ newPassword: val }) });
+                     alert("Password updated");
+                   } catch(e) { alert(e.message); }
+                 }}>Save</button>
+               </div>
+             </div>
+           </div>
+           
+           <div className="modal-actions">
+             <button className="btn-primary" onClick={() => setModals({ ...modals, settings: false })}>Close</button>
+           </div>
+        </Modal>
+      )}
+
+      {modals.admin && (
+        <Modal title="Admin Panel" onClose={() => setModals({ ...modals, admin: false })}>
+          <div className="modal-row">
+            <div style={{fontWeight:'bold'}}>Current Signup Code:</div>
+            <div style={{fontSize:'24px', fontFamily:'monospace', padding:'10px', background:'#eee', borderRadius:'8px', textAlign:'center', letterSpacing:'2px'}}>
+              {adminCode || "Loading..."}
+            </div>
+            <div style={{fontSize:'11px', color:'#666'}}>Share this code with new users. It rotates every hour.</div>
+          </div>
+          <div className="modal-actions">
+            <button className="btn-primary" onClick={() => setModals({ ...modals, admin: false })}>Close</button>
+          </div>
         </Modal>
       )}
     </div>
