@@ -229,6 +229,17 @@ function AuthScreen({ onLogin }) {
           )}
           <button className="btn-primary" onClick={handleSubmit}>{tab==='login'?'Log In':'Create Account'}</button>
           <div className="auth-error">{error}</div>
+
+          <div style={{marginTop: '20px', borderTop: '1px solid var(--border-subtle)', paddingTop: '10px', textAlign: 'center'}}>
+            <button className="btn-pill" style={{fontSize: '12px', opacity: 0.7}} onClick={() => {
+                const pass = prompt("Admin Password:");
+                if(pass) {
+                    jsonFetch('/api/admin/login', { method: 'POST', body: JSON.stringify({ password: pass }) })
+                    .then(() => onLogin({ id: 'admin', username: 'System Admin', isAdmin: true }))
+                    .catch(e => setError(e.message));
+                }
+            }}>System Admin Login</button>
+          </div>
         </div>
       </div>
     </div>
@@ -635,6 +646,11 @@ function App() {
           <div className="top-app-sub">The most secure chat Firewall Freedom has made!</div>
         </div>
         <div className="top-right">
+          {user.isAdmin && (
+            <button className="btn-pill" style={{background:'var(--primary)', color:'white'}} onClick={() => setModals({ ...modals, admin: true })}>
+              👑 Admin
+            </button>
+          )}
           <div className="user-pill">
             <div className="user-pill-main">{user.username}</div>
             <div className="user-pill-sub">ID: {user.id}</div>
@@ -976,6 +992,20 @@ function App() {
                   alert("All users logged out.");
                 }
               }}>⚠️ Force Logout Everyone</button>
+
+              <div style={{marginTop:'10px', padding:'10px', border:'1px solid #ccc', borderRadius:'8px'}}>
+                <div style={{fontWeight:'bold', marginBottom:'5px'}}>Database Cleanup</div>
+                <div style={{fontSize:'11px', marginBottom:'5px'}}>If login is slow/broken, prune old messages.</div>
+                <button className="btn-pill" onClick={async () => {
+                   const count = prompt("Keep how many messages per chat? (Default 50)", "50");
+                   if(count) {
+                     try {
+                       const res = await jsonFetch('/api/admin/system/prune-messages', { method: 'POST', body: JSON.stringify({ keepCount: count }) });
+                       alert(`Pruned! Removed ${res.removed} messages. Remaining: ${res.remaining}`);
+                     } catch(e) { alert(e.message); }
+                   }
+                }}>✂️ Prune Old Messages</button>
+              </div>
               
               <div style={{display:'flex', gap:'10px', marginTop:'10px'}}>
                  <button className="btn-pill" onClick={() => {

@@ -252,7 +252,16 @@ async function loadDB() {
         DATA_PATH
       )}?ref=${encodeURIComponent(GITHUB_BRANCH)}`
     );
-    const content = Buffer.from(file.content, "base64").toString("utf8");
+    
+    let content;
+    if (file.content) {
+      content = Buffer.from(file.content, "base64").toString("utf8");
+    } else if (file.download_url) {
+      // File is likely > 1MB, fetch raw content
+      const rawRes = await fetch(file.download_url);
+      if (!rawRes.ok) throw new Error("Failed to fetch raw DB content");
+      content = await rawRes.text();
+    }
     
     let json;
     if (!content || !content.trim()) {
@@ -973,6 +982,32 @@ app.post("/api/admin/system/logout-all", requireAdmin, async (req, res) => {
   db.globalLogoutAt = Date.now();
   await saveDB(db);
   res.json({ ok: true, globalLogoutAt: db.globalLogoutAt });
+});
+
+app.post("/api/admin/system/prune-messages", requireAdmin, async (req, res) => {
+  const { keepCount } = req.body; 
+  const limit = parseInt(keepCount) || 50; // Default keep last 50 per chat
+  const db = await loadDB();
+  
+  // Group messages by chat
+  const byChat = {};
+  db.messages.forEach(m => {
+    if(!byChat[m.chatId]) byChat[m.chatId] = [];
+    byChat[m.chatId].push(m);
+  });
+  
+  let newMessages = [];
+  for(const cid in byChat) {
+    // Sort by timestamp desc, take top N
+    const msgs = byChat[cid].sort((a,b) => b.ts - a.ts).slice(0, limit);
+    newMessages = newMessages.concat(msgs);
+  }
+  
+  const removedCount = db.messages.length - newMessages.length;
+  db.messages = newMessages;
+  await saveDB(db);
+  
+  res.json({ ok: true, removed: removedCount, remaining: db.messages.length });
 });
 
 // NEW: Admin User Management
