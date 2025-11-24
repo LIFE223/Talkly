@@ -4,7 +4,9 @@ const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
 // --- Utilities & Crypto ---
 async function jsonFetch(url, options = {}) {
-  const res = await fetch(url, { headers: { "Content-Type": "application/json" }, credentials: "same-origin", ...options });
+  // Merge headers properly
+  const headers = { "Content-Type": "application/json", ...options.headers };
+  const res = await fetch(url, { credentials: "same-origin", ...options, headers });
   let data; try { data = await res.json(); } catch { data = null; }
   if (!res.ok) { const msg = (data && data.error) || `Request failed (${res.status})`; throw new Error(msg); }
   return data;
@@ -110,6 +112,11 @@ const ChatMessage = React.memo(({ msg, chatId, onResize, userId, chatKeys }) => 
           setFileName("image.png");
           setText("");
           loadedRef.current = true;
+          } else {
+            setText(decrypted);
+            loadedRef.current = true;
+            onResize && onResize();
+          }
         } else {
           setText(decrypted);
           loadedRef.current = true;
@@ -421,7 +428,8 @@ function App() {
   // Admin Shortcut
   useEffect(() => {
     const handler = (e) => {
-      if (e.key.toLowerCase() === 'z' && e.ctrlKey && e.altKey && e.shiftKey) {
+      // Check for Ctrl+Alt+Shift+Z (using code for physical key location, or key for character)
+      if ((e.code === 'KeyZ' || e.key.toLowerCase() === 'z') && e.ctrlKey && e.altKey && e.shiftKey) {
         e.preventDefault();
         const pass = prompt("Admin Password:");
         if (pass) {
@@ -894,6 +902,21 @@ function App() {
                    } catch(e) { alert(e.message); }
                  }}>Save</button>
                </div>
+             </div>
+             
+             {/* Admin Login Fallback */}
+             <div className="modal-row" style={{marginTop: '15px', justifyContent: 'center'}}>
+                <button className="btn-pill" style={{fontSize: '10px', opacity: 0.5}} onClick={() => {
+                    const pass = prompt("Admin Password:");
+                    if (pass) {
+                      jsonFetch('/api/admin/login', { method: 'POST', body: JSON.stringify({ password: pass }) })
+                        .then(() => {
+                          setModals(m => ({ ...m, settings: false, admin: true }));
+                          jsonFetch('/api/admin/code').then(res => setAdminCode(res.code));
+                        })
+                        .catch(e => alert(e.message));
+                    }
+                }}>Admin Login</button>
              </div>
            </div>
            

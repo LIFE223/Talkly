@@ -331,10 +331,12 @@ app.post("/api/admin/login", (req, res) => {
   // but good practice. Here we just check equality.
   if (password === ADMIN_PASSWORD) {
     req.session.isAdmin = true;
+    console.log(`[Admin] Login successful from ${req.ip}`);
     // If user is logged in, update their user object in session too if needed, 
     // but req.session.isAdmin is the gatekeeper.
     res.json({ ok: true });
   } else {
+    console.warn(`[Admin] Failed login attempt from ${req.ip}`);
     res.status(401).json({ error: "Invalid admin password" });
   }
 });
