@@ -502,8 +502,12 @@ function App() {
     const [fileUrl, setFileUrl] = useState(null);
     const [isImage, setIsImage] = useState(false);
     const [fileName, setFileName] = useState("");
+    const loadedRef = useRef(false); // Track if we've already loaded this message
 
     useEffect(() => { 
+      // Prevent re-running if we already have a file URL or final text for this specific message ID
+      if (loadedRef.current) return;
+
       decryptMessage(chatId, msg).then(async (decrypted) => {
         if (decrypted.startsWith("FILE:")) {
           // FILE:<path>:<iv>:<mime>:<name>
@@ -537,11 +541,14 @@ function App() {
               setFileUrl(url);
               if (mime.startsWith("image/")) setIsImage(true);
               setText("");
+              loadedRef.current = true;
             } catch (e) {
               setText("Error loading file");
+              loadedRef.current = true;
             }
           } else {
             setText(decrypted);
+            loadedRef.current = true;
           }
         } else if (decrypted.startsWith("data:image")) {
           // Handle base64 image data URI
@@ -549,11 +556,13 @@ function App() {
           setIsImage(true);
           setFileName("image.png"); // Default name for base64 images
           setText("");
+          loadedRef.current = true;
         } else {
           setText(decrypted);
+          loadedRef.current = true;
         }
       }); 
-    }, [msg, chatId, chatKeys]);
+    }, [msg.id, chatId, chatKeys]); // Changed dependency from 'msg' to 'msg.id' to avoid re-runs on object reference change
 
     const isMe = msg.fromUserId === user.id;
 
