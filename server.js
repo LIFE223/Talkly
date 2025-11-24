@@ -733,8 +733,23 @@ app.get("/api/file", requireAuth, async (req, res) => {
     const file = await githubRequest(
       `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodeURIComponent(filePath)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`
     );
-    // file.content is base64
-    const buffer = Buffer.from(file.content, "base64");
+    
+    let buffer;
+    if (file.content) {
+      // Small file (<1MB), content is in response (base64 encoded by GitHub API)
+      buffer = Buffer.from(file.content, "base64");
+    } else if (file.download_url) {
+      // Large file, fetch from download_url
+      const downloadRes = await fetch(file.download_url, {
+        headers: { Authorization: `Bearer ${GITHUB_TOKEN}` }
+      });
+      if (!downloadRes.ok) throw new Error("Failed to download raw file");
+      const arrayBuffer = await downloadRes.arrayBuffer();
+      buffer = Buffer.from(arrayBuffer);
+    } else {
+      throw new Error("No content found");
+    }
+
     res.set("Content-Type", "application/octet-stream");
     res.send(buffer);
   } catch (err) {

@@ -543,6 +543,12 @@ function App() {
           } else {
             setText(decrypted);
           }
+        } else if (decrypted.startsWith("data:image")) {
+          // Handle base64 image data URI
+          setFileUrl(decrypted);
+          setIsImage(true);
+          setFileName("image.png"); // Default name for base64 images
+          setText("");
         } else {
           setText(decrypted);
         }
